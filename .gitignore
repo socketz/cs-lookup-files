@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# uv
+.uv/
+
+# Project runtime output
+output/
+state/
+cache/
+fixtures/mirror/
+
+# Tooling/IDE
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

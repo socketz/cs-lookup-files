@@ -1,0 +1,5 @@
+91.194.90.0/23 ; SBL1
+80.255.3.0/24 ; SBL2
+; SBL3 - comment with no network
+46.36.200.0/24 ; AS-SPAMHAUS
+10.0.0.0/8 ; SBL999

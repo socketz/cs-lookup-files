@@ -1,0 +1,56 @@
+name: Publish Release
+
+on:
+  workflow_run:
+    workflows:
+      - Build Lookups
+    types:
+      - completed
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: lookup-files
+          path: artifacts
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read version from metadata
+        # Source of truth for the version: the release tag must match the data
+        # inside metadata.json (generated during the build run).
+        id: version
+        run: |
+          if [ ! -f artifacts/metadata.json ]; then
+            echo "::error::metadata.json missing from build artifacts"
+            exit 1
+          fi
+          VERSION=$(jq -r '.version' artifacts/metadata.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Found version: $VERSION"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3.0.4
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          body: |
+            Automated lookup-file build for ${{ steps.version.outputs.version }}.
+
+            Consumers should use the stable `latest` URLs:
+            - https://github.com/${{ github.repository }}/releases/latest/download/malicious_ips.csv
+            - https://github.com/${{ github.repository }}/releases/latest/download/malicious_networks.csv
+            - https://github.com/${{ github.repository }}/releases/latest/download/malicious_asns.csv
+            - https://github.com/${{ github.repository }}/releases/latest/download/metadata.json
+            - https://github.com/${{ github.repository }}/releases/latest/download/state.json
+          files: artifacts/*

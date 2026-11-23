@@ -1,0 +1,118 @@
+# Per-source ETL configuration. Adding a source = appending a block here;
+# no core code changes are required (see docs/sources.md).
+#
+# API keys are referenced as $ENV_VAR and resolved from the runtime
+# environment (set via the workflow env: block). They never appear in this file.
+
+sources:
+  - id: firehol
+    enabled: true
+    weight: 85
+    output_types: [ip, network]
+    categories:
+      default: [blocklist]
+    fetch:
+      url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset
+      timeout_seconds: 120
+      retries: 3
+    parse:
+      format: ipset
+      comment_prefix: "#"
+    fields:
+      ip: ip_or_cidr
+      network: ip_or_cidr
+    clean:
+      - {op: drop_private}
+      - {op: require_globally_routable}
+
+  - id: spamhaus_drop
+    enabled: true
+    weight: 100
+    output_types: [network]
+    categories:
+      default: [blocklist]
+    fetch:
+      url: https://www.spamhaus.org/drop/drop.txt
+      timeout_seconds: 60
+      retries: 3
+    parse:
+      format: cidr_lines
+      comment_prefix: ";"
+    fields:
+      network: cidr
+    clean:
+      - {op: drop_bogon_networks}
+
+  - id: abusech_feodo
+    enabled: true
+    weight: 90
+    output_types: [ip]
+    categories:
+      default: [malware_c2]
+    fetch:
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
+      timeout_seconds: 60
+      retries: 3
+    parse:
+      format: plain_lines
+      comment_prefix: "#"
+    fields:
+      ip: line
+    clean:
+      - {op: parse_and_validate_ip}
+
+  - id: abuseipdb
+    enabled: true
+    weight: 80
+    output_types: [ip]
+    categories:
+      default: [abuse]
+    fetch:
+      url: https://api.abuseipdb.com/api/v2/blacklist
+      params:
+        confidenceMinimum: 90
+      headers:
+        Key: "$ABUSEIPDB_API_KEY"
+        Accept: "application/json"
+      timeout_seconds: 60
+      retries: 3
+    parse:
+      format: json
+      records: "data.list"
+    fields:
+      ip: ipAddress
+      last_seen: lastReportedAt
+    clean:
+      - {op: field_ge, field: abuseConfidenceScore, value: 90}
+
+  - id: alienvault_otx
+    enabled: true
+    weight: 70
+    output_types: [ip]
+    categories:
+      default: [malware]
+    fetch:
+      url: https://otx.alienvault.com/api/v1/indicators/export
+      headers:
+        X-OTX-API-KEY: "$OTX_API_KEY"
+      pagination:
+        param: page
+        size_param: limit
+        size: 500
+        max_pages: 200
+        stop_when_empty: true
+      timeout_seconds: 60
+      retries: 3
+    parse:
+      format: csv
+      delimiter: ","
+      has_header: true
+    fields:
+      type: "0"
+      ip: "1"
+    clean:
+      # Export lines look like: "type","indicator","pulse_name",...
+      # Accept only bare IPv4/IPv6 indicators before further cleaning.
+      - {op: field_in, field: type, values: [IPv4, IPv6]}
+      - {op: parse_and_validate_ip}
+      - {op: drop_private}

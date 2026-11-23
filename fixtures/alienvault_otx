@@ -1,0 +1,5 @@
+"type","indicator","pulse_name","id"
+"IPv4","222.186.0.9","Test Pulse","123"
+"IPv4","168.121.0.3","Botnet","456"
+"domain","evil.example.org","Domains","789"
+"IPv4","91.194.90.11","Scan","101"

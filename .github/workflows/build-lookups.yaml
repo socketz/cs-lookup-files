@@ -1,0 +1,77 @@
+name: Build Lookups
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-lookups
+  cancel-in-progress: true
+
+env:
+  # Secrets enter via env vars only; never committed in config/sources.yaml.
+  ABUSEIPDB_API_KEY: ${{ secrets.ABUSEIPDB_API_KEY }}
+  OTX_API_KEY: ${{ secrets.OTX_API_KEY }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.4.0
+
+      - name: Setup Python
+        run: uv python install 3.13
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Typecheck
+        run: uv run mypy src
+
+      - name: Test
+        run: uv run pytest tests -q
+
+      - name: Fetch previous state
+        # Missing state (first run) is tolerated: the source is published with
+        # empty history and a 404 is expected.
+        run: |
+          mkdir -p state
+          curl -fsSL \
+            -o state/state.json \
+            "https://github.com/${{ github.repository }}/releases/latest/download/state.json" \
+            || echo "no previous state; starting fresh"
+
+      - name: Build lookup files
+        run: |
+          uv run cs-lookup-files build \
+            --config-dir config \
+            --output-dir output \
+            --state state/state.json \
+            --cache-dir cache
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: lookup-files
+          path: |
+            output/malicious_ips.csv
+            output/malicious_ips.json
+            output/malicious_networks.csv
+            output/malicious_networks.json
+            output/malicious_asns.csv
+            output/malicious_asns.json
+            output/metadata.json
+            output/state.json
+          retention-days: 30

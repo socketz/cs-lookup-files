@@ -1,0 +1,6 @@
+{"data":{"list":[
+  {"ipAddress":"222.186.0.5","abuseConfidenceScore":95,"lastReportedAt":"2026-11-20T00:00:00Z"},
+  {"ipAddress":"91.194.90.7","abuseConfidenceScore":99,"lastReportedAt":"2026-11-22T00:00:00Z"},
+  {"ipAddress":"10.1.1.1","abuseConfidenceScore":100,"lastReportedAt":"2026-11-22T00:00:00Z"},
+  {"ipAddress":"80.255.3.4","abuseConfidenceScore":50,"lastReportedAt":"2026-11-22T00:00:00Z"}
+]}}
