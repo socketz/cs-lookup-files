@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import polars as pl
 
+from ..collectors.fetch import PartialFetchError
 from ..models.config import SourceConfig
 from ..normalizers import ipaddr
 from ..normalizers.ops import OpContext, apply_clean_ops
@@ -114,11 +115,18 @@ def _build_network_row(raw_row: Row, source: SourceConfig) -> Row | None:
 def run_source(source: SourceConfig, fetch_fn: FetchFn, run_time: datetime) -> SourceOutput:
     """Run one source through fetch -> parse -> map -> clean -> classify.
 
-    A failing fetch or parse marks the source ``failed`` but never raises, so a
-    single source cannot bring the whole run down.
+    A failing fetch or parse marks the source ``failed``/``partial`` but never
+    raises, so a single source cannot bring the whole run down. A mid-
+    pagination failure (e.g. an OTX 504 after several successful pages) keeps
+    the pages already fetched and marks the source ``partial``.
     """
+    text = ""
+    partial = False
     try:
         text = fetch_fn(source)
+    except PartialFetchError as exc:
+        text = exc.partial_text
+        partial = True
     except Exception:  # noqa: BLE001 - intentionally tolerant
         return SourceOutput(source.id, "failed", 0, _empty_ip(), _empty_network())
 
@@ -157,7 +165,8 @@ def run_source(source: SourceConfig, fetch_fn: FetchFn, run_time: datetime) -> S
 
     ip_df = _df_from_rows(ip_rows, IP_COLUMNS, ip=True)
     net_df = _df_from_rows(net_rows, NETWORK_COLUMNS, ip=False)
-    return SourceOutput(source.id, "ok", len(cleaned), ip_df, net_df)
+    status: SourceStatus = "partial" if partial else "ok"
+    return SourceOutput(source.id, status, len(cleaned), ip_df, net_df)
 
 
 def _empty_ip() -> pl.DataFrame:

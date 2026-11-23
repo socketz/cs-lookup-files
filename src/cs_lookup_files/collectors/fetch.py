@@ -16,6 +16,20 @@ class FetchError(RuntimeError):
     """Raised when a source cannot be fetched (network, auth env, HTTP status)."""
 
 
+class PartialFetchError(FetchError):
+    """Some pages were fetched before a mid-pagination failure.
+
+    Carries the successfully fetched pages so the pipeline can still ingest them
+    and mark the source ``partial`` instead of discarding everything.
+    """
+
+    def __init__(self, partial_text: str, *, page: int, cause: BaseException):
+        super().__init__(f"pagination stopped after page {page - 1}")
+        self.partial_text = partial_text
+        self.page = page
+        self.cause = cause
+
+
 def resolve_env_ref(value: str) -> str | None:
     """Resolve ``$VAR`` header/param values from the runtime environment.
 
@@ -80,7 +94,14 @@ def fetch_text(fetch: FetchConfig, parse_cfg: ParseConfig | None = None) -> str:
             pages.append(_get_once(client, fetch, page=None))
             return "\n".join(pages)
         for page in range(1, pagination.max_pages + 1):
-            body = _get_once(client, fetch, page=page)
+            try:
+                body = _get_once(client, fetch, page=page)
+            except FetchError as exc:
+                # Mid-pagination failure: keep what we already have so an OTX
+                # 504 at page N does not discard pages 1..N-1. Mark partial.
+                if pages:
+                    raise PartialFetchError("\n".join(pages), page=page, cause=exc) from exc
+                raise
             pages.append(body)
             if not pagination.stop_when_empty and pagination.total_pages_field is None:
                 continue
