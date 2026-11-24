@@ -1,0 +1,15 @@
+---
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/socketz/cs-lookup-files/security/advisories/new
+    about: Do not open a public issue for security problems. See SECURITY.md.
+  - name: CrowdStrike integration guide
+    url: https://github.com/socketz/cs-lookup-files/blob/master/docs/crowdstrike.md
+    about: LogScale lookups, Fusion SOAR imports, and correlation rules.
+  - name: Sources
+    url: https://github.com/socketz/cs-lookup-files/blob/master/docs/sources.md
+    about: Feed catalogue, parsing formats, and category vocabulary.
+  - name: Confidence scoring
+    url: https://github.com/socketz/cs-lookup-files/blob/master/docs/scoring.md
+    about: How the 0-100 confidence score is computed and decays.
