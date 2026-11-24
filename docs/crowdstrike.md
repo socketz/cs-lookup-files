@@ -4,11 +4,11 @@ The published lookup files are designed to be consumed by Falcon LogScale,
 correlation rules and Fusion SOAR with no transformation. Stable URLs:
 
 ```
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_ips.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_networks.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_asns.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/metadata.json
-https://github.com/<org>/cs-lookup-files/releases/latest/download/state.json
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_ips.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_networks.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_asns.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/metadata.json
+https://github.com/socketz/cs-lookup-files/releases/latest/download/state.json
 ```
 
 ## Falcon LogScale: scheduled scheduled import
@@ -59,7 +59,7 @@ same via file download):
 
 ```json
 {
-  "source_url": "https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_ips.csv",
+  "source_url": "https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_ips.csv",
   "format": "csv",
   "target_lookup": "malicious_ips",
   "schedule": "*/6 * * * *",
