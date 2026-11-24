@@ -10,7 +10,7 @@ from yaml import safe_load
 
 from ..collectors import fetch
 from ..etl.engine import run_source
-from ..models.config import Settings, SourceConfig, SourcesFile
+from ..models.config import FeedConfig, Settings, SourceConfig, SourcesFile
 from ..pipeline import Pipeline, PipelineError
 
 app = typer.Typer(
@@ -118,11 +118,11 @@ def collect(
     run_time = _run_time_now()
     sources, _settings = _load_paths(config_dir)
 
-    def fetcher(cfg: SourceConfig) -> str:
+    def fetcher(source: SourceConfig, feed: FeedConfig) -> str:
         if offline:
             base = Path(offline_dir) if offline_dir else Path("fixtures")
-            return (base / cfg.id).read_text(encoding="utf-8")
-        return fetch.fetch_text(cfg.fetch, cfg.parse)
+            return (base / feed.fixture_key()).read_text(encoding="utf-8")
+        return fetch.fetch_text(feed.fetch, feed.parse)
 
     for cfg in sources.sources:
         if not cfg.enabled:
@@ -131,9 +131,15 @@ def collect(
             continue
         try:
             out = run_source(cfg, fetcher, run_time)
+            if not out.df.is_empty():
+                counts = ", ".join(
+                    f"{row['type']}={row['len']}"
+                    for row in out.df.group_by("type").len().sort("type").to_dicts()
+                )
+            else:
+                counts = "empty"
             typer.echo(
-                f"  {out.source_id:<20} {out.status:<8} "
-                f"ip_rows={out.ip_df.height} net_rows={out.network_df.height}"
+                f"  {out.source_id:<20} {out.status:<8} rows={out.df.height} [{counts}]"
             )
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"  {cfg.id:<20} failed: {exc}", err=True)
@@ -150,6 +156,22 @@ def validate(
         typer.echo(f"config invalid: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo("config OK")
+
+
+@app.command()
+def schema(
+    output_dir: Annotated[
+        Path, typer.Option("--output-dir", help="Where to write the generated JSON Schema")
+    ] = Path("config"),
+    verbose: Annotated[bool, typer.Option("--verbose")] = False,
+) -> None:
+    """Regenerate the JSON Schema for sources.yaml and settings.yaml."""
+    _configure_logging(verbose)
+    from ..schemas import write_schemas
+
+    files = write_schemas(output_dir)
+    for path in files:
+        typer.echo(f"wrote {path}")
 
 
 def main() -> None:

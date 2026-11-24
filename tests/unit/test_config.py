@@ -9,6 +9,7 @@ from cs_lookup_files.models.config import (
     CATEGORY_VOCAB,
     CategoriesConfig,
     CleanOp,
+    FeedConfig,
     ParseConfig,
     SourceConfig,
     SourcesFile,
@@ -17,18 +18,29 @@ from cs_lookup_files.models.config import (
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 
-def _valid_source() -> dict:
-    return {
-        "id": "test_source",
-        "enabled": True,
-        "weight": 85,
-        "output_types": ["ip"],
-        "categories": {"default": ["blocklist"]},
+def _valid_feed(**overrides) -> dict:
+    payload = {
+        "id": "feed_a",
         "fetch": {"url": "https://example.org/feed.txt"},
         "parse": {"format": "plain_lines"},
+        "output_types": ["ip"],
         "fields": {"ip": "line"},
         "clean": [],
     }
+    payload.update(overrides)
+    return payload
+
+
+def _valid_source(**overrides) -> dict:
+    payload = {
+        "id": "test_source",
+        "enabled": True,
+        "weight": 85,
+        "categories": {"default": ["blocklist"]},
+        "feeds": [_valid_feed()],
+    }
+    payload.update(overrides)
+    return payload
 
 
 @pytest.fixture()
@@ -44,7 +56,12 @@ def test_vocabulary_includes_planned_categories():
 def test_valid_source_loads(example_source):
     assert example_source.id == "test_source"
     assert example_source.weight == 85
-    assert example_source.parse.format == "plain_lines"
+    assert example_source.feeds[0].parse.format == "plain_lines"
+
+
+def test_source_requires_feeds():
+    with pytest.raises(ValueError):
+        SourceConfig.model_validate(_valid_source(feeds=[]))
 
 
 def test_invalid_category_rejected():
@@ -53,10 +70,18 @@ def test_invalid_category_rejected():
 
 
 def test_output_types_require_field_mapping():
+    feed = _valid_feed(output_types=["network"], fields={"ip": "line"})
     with pytest.raises(ValueError):
-        SourceConfig.model_validate(
-            {**_valid_source(), "output_types": ["network"], "fields": {"ip": "line"}}
-        )
+        FeedConfig.model_validate(feed)
+
+
+def test_ioc_weights_validated():
+    with pytest.raises(ValueError):
+        SourceConfig.model_validate(_valid_source(ioc_weights={"ip": 200}))
+    with pytest.raises(ValueError):
+        SourceConfig.model_validate(_valid_source(ioc_weights={"nonsense": 50}))
+    ok = SourceConfig.model_validate(_valid_source(ioc_weights={"domain": 90}))
+    assert ok.ioc_weights == {"domain": 90}
 
 
 def test_unknown_clean_op_rejected():
@@ -86,16 +111,20 @@ def test_duplicate_source_ids_rejected():
         SourcesFile.model_validate(payload)
 
 
+def test_feed_fixture_key_defaults_to_url_basename():
+    feed = FeedConfig.model_validate(_valid_feed(id=None))
+    assert feed.fixture_key() == "feed.txt"
+
+
 def test_repo_sources_validate():
     """The shipped sources.yaml must validate against the schema."""
     data = safe_load((BASE_DIR / "config" / "sources.yaml").read_text(encoding="utf-8"))
     sources = SourcesFile.model_validate(data)
-    assert len(sources.sources) == 5
     ids = {s.id for s in sources.sources}
-    assert {"firehol", "spamhaus_drop", "abusech_feodo", "abuseipdb", "alienvault_otx"} <= ids
+    assert {"firehol", "spamhaus", "abusech", "abuseipdb", "alienvault_otx"} <= ids
     for source in sources.sources:
         assert 0 <= source.weight <= 100
-        assert source.clean
+        assert source.feeds  # every source declares at least one feed
 
 
 def test_repo_settings_validate():
@@ -116,7 +145,8 @@ def test_no_secrets_in_sources_config():
     # Credential headers must be referenced via $VAR, never embedded.
     credential_headers = {"key", "x-otx-api-key", "authorization", "x-api-key"}
     for source in sources.sources:
-        for name, value in source.fetch.headers.items():
-            if name.lower() in credential_headers:
-                assert value.startswith("$"), f"{source.id} header {name} must be an env reference"
+        for feed in source.feeds:
+            for name, value in feed.fetch.headers.items():
+                if name.lower() in credential_headers:
+                    assert value.startswith("$"), f"{source.id}/{feed.fixture_key()} header {name} must be env"
     assert "application/json" in blob

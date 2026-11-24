@@ -78,6 +78,8 @@ def _parse_delimited(text: str, cfg: ParseConfig, delimiter: str) -> Iterator[Ra
 
 
 def _walk_path(obj: Any, path: str) -> Any:
+    if path == "$" or path == "":
+        return obj
     current = obj
     for part in path.split("."):
         if isinstance(current, dict):

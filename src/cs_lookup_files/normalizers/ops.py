@@ -97,8 +97,13 @@ def _op_parse_and_validate_cidr(row: Row, ctx: OpContext, op: CleanOp) -> Row | 
 
 def _op_drop_private(row: Row, ctx: OpContext, op: CleanOp) -> Row | None:
     value = _operand(row, op)
-    if isinstance(value, str) and not ipaddr.is_globally_routable(value):
-        return None
+    if isinstance(value, str):
+        parsed = ipaddr.parse_ip_or_cidr(value)
+        if parsed is None:
+            # Not an IP/CIDR (domain, url, hash, email, ...): keep untouched.
+            return row
+        if not ipaddr.is_globally_routable(parsed):
+            return None
     return row
 
 

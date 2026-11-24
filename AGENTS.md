@@ -90,7 +90,22 @@ The generated datasets should be directly consumable by CrowdStrike without requ
 
 # Intelligence Sources
 
-## MVP Sources
+## MVP / Active Sources
+
+Sources are enabled from `config/sources.yaml` only when they are frequently
+updated (feeds that go months without updates are excluded). The feeds live as
+*consolidated* datasets; no source-specific outputs.
+
+### Source = origin, with an array of feeds
+
+Each `sources.yaml` entry is an **origin** (e.g. `firehol`) whose `id` is the
+scoring identity, holding a `feeds` array. Each feed is one file/URL with its
+own `fetch`, `parse`, `fields`, `output_types` and `clean`. Indicators confirmed
+by several feeds of the same origin count as **one** confirming source. The
+origin carries the global `weight` and optional per-IOC-type `ioc_weights`.
+Adding a feed is config-only.
+
+Core builders:
 
 ### FireHOL
 
@@ -110,7 +125,7 @@ Used for botnet infrastructure and malware C2 visibility.
 
 ### AlienVault OTX
 
-Used as an additional confidence source.
+Used as an additional confidence source. Multi-type (IP/domain/url/md5/sha256/email).
 
 ### AbuseIPDB
 
@@ -126,18 +141,39 @@ The solution must remain sustainable even if AbuseIPDB API quotas are reduced.
 
 The repository owner currently has AbuseIPDB Webmaster status, but the architecture must not depend on elevated API consumption.
 
+### DShield (dshield_intelfeed)
+
+`isc.sans.edu/api/intelfeed` — daily IP summary with feed labels; benign
+infrastructure labels are filtered out.
+
+### FireHOL per-category sets
+
+Frequently-updated FireHOL `.netset`/`.ipset` sets (feodo_badips, c2_tracker,
+cybercrime, et_compromised, blocklist_de, ciarmy, dshield, greensnow,
+bruteforceblocker, stopforumspam, cybercure) — high-churn IP feeds selected for
+operational value.
+
 ---
 
-## Future Sources
+## Future Sources / Feed Catalogue
 
-Implement future providers through plugins:
+The intended expansion is driven by the public feed catalogue in
+[threat-intelligence-feeds.csv](https://github.com/kraloveckey/threat-intelligence-feeds/raw/refs/heads/main/threat-intelligence-feeds.csv)
+(~390 active feeds) plus the curated awesome lists:
 
-- Blocklist.de
-- DShield
-- CINS Army
-- Emerging Threats
-- GreyNoise
-- Shadowserver
+- [hslatman/awesome-threat-intelligence](https://github.com/hslatman/awesome-threat-intelligence/)
+- [mthcht/awesome-lists](https://github.com/mthcht/awesome-lists)
+
+New sources are added as **config-only** entries with zero core-logic changes;
+the roadmap in `docs/roadmap.md` phases their rollout by IOC type and
+auth/format requirements.
+
+When adding a source, set two tunables per feed:
+
+- `weight` — global source-reliability weight (0..100).
+- `ioc_weights` — optional per-IOC-type weight (0..100) keyed by indicator type
+  (ip/network/domain/url/md5/sha256/email), reflecting the feed's reliability
+  for that *specific* IOC type. Falls back to `weight`.
 
 No modifications to core logic should be required when adding new sources.
 
@@ -145,9 +181,9 @@ No modifications to core logic should be required when adding new sources.
 
 # Generated Lookup Files
 
-The MVP should generate only three lookup datasets.
-
----
+One consolidated dataset per supported IOC type, plus the ASN rollup. No
+source-specific exports; everything converges into these files so Falcon
+consumers have a small, predictable surface.
 
 ## malicious_ips
 
@@ -227,6 +263,25 @@ asn,asn_name,country,confidence_score
 
 ---
 
+## malicious_domains
+
+Hostname / domain reputation. Fields: `domain`, `confidence_score`,
+`source_count`, `sources`, `categories`, `first_seen`, `last_seen`.
+
+## malicious_urls
+
+URL / URI reputation. Same fields as domains, with `url` as identity.
+
+## malicious_md5 / malicious_sha256
+
+File-hash reputation (MD5 and SHA256). Same fields, identity `md5`/`sha256`.
+
+## malicious_emails
+
+Sender / phishing email reputation. Identity `email`.
+
+---
+
 # Release Structure
 
 GitHub Releases are the distribution mechanism.
@@ -245,6 +300,21 @@ latest/
 │
 ├── malicious_asns.csv
 ├── malicious_asns.json
+│
+├── malicious_domains.csv
+├── malicious_domains.json
+│
+├── malicious_urls.csv
+├── malicious_urls.json
+│
+├── malicious_md5.csv
+├── malicious_md5.json
+│
+├── malicious_sha256.csv
+├── malicious_sha256.json
+│
+├── malicious_emails.csv
+├── malicious_emails.json
 │
 └── metadata.json
 ```
@@ -293,16 +363,27 @@ Example:
   "version": "2026.11.23.1200",
   "generated_at": "2026-11-23T12:00:00Z",
   "sources": [
-    "firehol",
+    "firehol_level1",
     "spamhaus_drop",
     "abusech_feodo",
     "alienvault_otx",
-    "abuseipdb"
+    "abuseipdb",
+    "dshield_intelfeed"
   ],
+  "source_status": {
+    "firehol_level1": "ok",
+    "spamhaus_drop": "ok",
+    "alienvault_otx": "skipped"
+  },
   "ioc_counts": {
-    "ips": 125000,
-    "networks": 8200,
-    "asns": 315
+    "malicious_ips": 125000,
+    "malicious_networks": 8200,
+    "malicious_asns": 315,
+    "malicious_domains": 4000,
+    "malicious_urls": 9000,
+    "malicious_md5": 300,
+    "malicious_sha256": 500,
+    "malicious_emails": 120
   }
 }
 ```
@@ -330,6 +411,13 @@ Suggested baseline weights:
 | FireHOL | 85 |
 | AbuseIPDB | 80 |
 | AlienVault OTX | 70 |
+
+Every source also accepts an optional `ioc_weights` map so its reliability can
+be tuned **per IOC type** (ip/network/domain/url/md5/sha256/email). For a given
+row, the effective weight used in scoring is
+`ioc_weights[source].get(type, weight)`; the global `weight` remains the
+fallback. This lets a C2 tracker weight `ip` above `domain`, or a phishing feed
+weight `url`/`domain` above `ip`, without changing core logic.
 
 Scoring Requirements:
 
@@ -502,24 +590,26 @@ against the generated lookup files.
 - FireHOL integration
 - Spamhaus DROP integration
 - Abuse.ch Feodo integration
-- AlienVault OTX integration
+- AlienVault OTX integration (multi-type: IP/domain/url/md5/sha256/email)
 - AbuseIPDB blacklist integration
+- DShield intelfeed integration
+- FireHOL per-category IP sets
 - ASN enrichment
 - Deduplication
-- Confidence scoring
+- Confidence scoring (global + per-IOC-type weights)
 - CSV export
 - JSON export
 - GitHub Releases publishing
 - GitHub Actions automation
+- Multi-IOC lookup datasets (ip, network, asn, domain, url, md5, sha256, email)
 
 ## Excluded
 
-- Domain intelligence
-- URL intelligence
-- File hashes
+- AV / sandbox verdict enrichment
 - Malware family attribution
 - Case management
-- TIP functionality
+- Full TIP functionality
+- Per-indicator live lookup endpoints
 
 ---
 
@@ -531,7 +621,8 @@ against the generated lookup files.
 - Direct CrowdStrike Falcon compatibility
 - Hundreds of thousands of indicators supported
 - Less than 30 minutes total execution time
-- Three high-quality lookup files generated every execution
+- Multi-IOC lookup files generated every execution
 - Zero manual intervention required
+- Expanding source catalogue without core-logic changes
 
 Produce a complete production-ready architecture, implementation plan, data models, workflows, GitHub Actions pipelines, scoring methodology, CrowdStrike integration examples, contributor guidelines, and roadmap for future expansion.

@@ -15,6 +15,7 @@ def score_df(
     source_max_scores: dict[str, int],
     run_time: datetime,
     key_column: str,
+    ioc_weights: dict[str, dict[str, int]] | None = None,
 ) -> pl.DataFrame:
     """Compute ``confidence_score`` and ``source_count`` for every row.
 
@@ -27,9 +28,15 @@ def score_df(
     then capped by source-count band (70/90/100) and, for single-source rows,
     by the per-source ``max_single_source_score`` (e.g. OTX 55).
 
-    ``df`` must contain ``sources`` (List[Utf8]), ``first_seen``/``last_seen``
-    (Datetime UTC) and a unique ``key_column``. Returns ``df`` (order
-    preserved) with ``confidence_score``/``source_count`` appended.
+    ``weights`` maps source id -> global weight. ``ioc_weights`` optionally maps
+    source id -> {indicator type: weight} to override the global weight per IOC
+    type (a C2 tracker is more reliable on ``ip`` than on ``domain``, etc.).
+    The effective weight of a source for a row is:
+    ``ioc_weights[src].get(type, weights[src])``.
+
+    ``df`` must contain ``sources`` (List[Utf8]), ``type``, ``first_seen``/
+    ``last_seen`` (Datetime UTC) and a unique ``key_column``. Returns ``df``
+    (order preserved) with ``confidence_score``/``source_count`` appended.
     """
     now_ts = int(run_time.timestamp())
     half_life = max(settings.half_life_days, 1e-9)
@@ -38,18 +45,22 @@ def score_df(
 
     # Row-wise probabilities from the fused sources list.
     sources = df["sources"].to_list()
+    types = df["type"].to_list() if "type" in df.columns else [None] * len(sources)
     # Per-row: p_comb, single-source max cap.
     row_probs: list[float] = []
     row_cap: list[int] = []
     row_source_count: list[int] = []
-    for srcs in sources:
+    for idx, srcs in enumerate(sources):
         row_source_count.append(len(srcs))
         p = 1.0
         # The single-source cap is the explicit per-source cap when it applies,
         # otherwise the default; multi-source rows fall back to the bands.
         single_cap = max(source_max_scores.get(s, 0) for s in srcs) or default_single
+        row_type = types[idx] if idx < len(types) else None
         for s in srcs:
             w = weights.get(s, DEFAULT_WEIGHT)
+            if ioc_weights and row_type is not None:
+                w = ioc_weights.get(s, {}).get(str(row_type), w)
             p *= 1.0 - w / 100.0
         row_probs.append(1.0 - p)
         row_cap.append(single_cap)

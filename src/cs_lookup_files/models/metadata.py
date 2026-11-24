@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-SourceStatusKind = Literal["ok", "partial", "failed"]
+SourceStatusKind = Literal["ok", "partial", "skipped", "failed"]
 
 
 class SourceResult(BaseModel):

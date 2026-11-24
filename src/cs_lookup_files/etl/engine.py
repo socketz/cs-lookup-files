@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -8,18 +9,28 @@ from typing import Any, Literal
 
 import polars as pl
 
-from ..collectors.fetch import PartialFetchError
-from ..models.config import SourceConfig
-from ..normalizers import ipaddr
+from ..collectors.fetch import MissingSecret, PartialFetchError
+from ..models.config import FeedConfig, SourceConfig
+from ..normalizers import indicators, ipaddr
+from ..normalizers.indicators import IndicatorType
 from ..normalizers.ops import OpContext, apply_clean_ops
 from ..normalizers.parsers import parse_rows
 
-FetchFn = Callable[[SourceConfig], str]
+logger = logging.getLogger("cs_lookup_files.engine")
 
-SourceStatus = Literal["ok", "partial", "failed"]
+FetchFn = Callable[[SourceConfig, FeedConfig], str]
 
-IP_COLUMNS = ("ip", "ip_int", "ip_version", "ip_key", "sources", "categories", "last_seen")
-NETWORK_COLUMNS = ("network", "family", "start_key", "start_int", "prefix", "sources", "categories", "last_seen")
+SourceStatus = Literal["ok", "partial", "skipped", "failed"]
+
+TypeKey = str  # "ip", "network", "domain", "md5", "sha256"
+
+# Unified accumulator frame columns across all indicator types.
+COMMON_COLUMNS = ("value", "sort_key", "type", "sources", "categories", "last_seen")
+# Per-type informational columns (nullable outside their type).
+EXTRA_COLUMNS = ("ip", "network", "asn", "asn_name", "country", "ip_int", "ip_version", "ip_key",
+                 "start_int", "family", "start_key", "prefix")
+
+ALL_COLUMNS = (*COMMON_COLUMNS, *EXTRA_COLUMNS)
 
 
 @dataclass
@@ -27,21 +38,18 @@ class SourceOutput:
     source_id: str
     status: SourceStatus
     records: int
-    ip_df: pl.DataFrame
-    network_df: pl.DataFrame
+    df: pl.DataFrame
 
 
 Row = dict[str, Any]
 
 
 def _resolve_raw(raw_row: Row, ref: str) -> Any | None:
-    if ref in raw_row:
-        return raw_row[ref]
-    return None
+    return raw_row.get(ref)
 
 
-def _attach_categories(row: Row, source: SourceConfig) -> list[str]:
-    cats = source.categories
+def _attach_categories(row: Row, source: SourceConfig, feed: FeedConfig) -> list[str]:
+    cats = feed.categories or source.categories
     if cats.field:
         raw = row.get(cats.field)
         label = str(raw) if raw is not None else ""
@@ -62,137 +70,199 @@ def _parse_last_seen(value: Any | None) -> datetime | None:
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=UTC)
+            dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(UTC)
     except ValueError:
         return None
 
 
-def _build_ip_row(raw_row: Row, source: SourceConfig) -> Row | None:
-    ip_value = raw_row.get("ip")
-    if not isinstance(ip_value, str) or "/" in ip_value:
+def _common_row(
+    type_: IndicatorType,
+    value: str,
+    raw_row: Row,
+    source: SourceConfig,
+    feed: FeedConfig,
+) -> Row | None:
+    canon = indicators.canonical_indicator(type_, value)
+    if canon is None:
         return None
-    parsed = ipaddr.parse_ip_or_cidr(ip_value)
-    if parsed is None or isinstance(parsed, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
-        return None
-    ip_str = str(parsed)
-    ip_int = ipaddr.ip_int(parsed) if parsed.version == 4 else None
     return {
-        "ip": ip_str,
-        "ip_int": ip_int,
-        "ip_version": parsed.version,
-        "ip_key": ipaddr.ip_sort_key(parsed),
+        "value": canon,
+        "sort_key": indicators.sort_key(type_, canon),
+        "type": type_,
+        # Scoring identity is the origin, not the individual file/URL.
         "sources": [source.id],
-        "categories": _attach_categories(raw_row, source),
+        "categories": _attach_categories(raw_row, source, feed),
         "last_seen": _parse_last_seen(raw_row.get("last_seen")),
     }
 
 
-def _build_network_row(raw_row: Row, source: SourceConfig) -> Row | None:
-    net_value = raw_row.get("network")
-    if not isinstance(net_value, str) or "/" not in net_value:
-        return None
-    try:
-        net = ipaddress.ip_network(net_value, strict=False)
-    except ValueError:
-        return None
-    if not ipaddr.is_globally_routable(net):
-        return None
-    family, start_key, prefix = ipaddr.network_sort_key(str(net))
-    start_int = int(net.network_address) if net.version == 4 else None
-    return {
-        "network": str(net),
-        "family": family,
-        "start_key": start_key,
-        "start_int": start_int,
-        "prefix": prefix,
-        "sources": [source.id],
-        "categories": _attach_categories(raw_row, source),
-        "last_seen": _parse_last_seen(raw_row.get("last_seen")),
-    }
+def _with_extras(row: Row, raw_row: Row) -> Row:
+    """Attach per-type informative columns (IP/network identity, ASN extras)."""
+    type_ = row["type"]
+    value: str = row["value"]
+    if type_ == "ip":
+        parsed = ipaddr.parse_ip_or_cidr(value)
+        if parsed is not None and not isinstance(parsed, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+            row["ip"] = str(parsed)
+            row["ip_int"] = ipaddr.ip_int(parsed) if parsed.version == 4 else None
+            row["ip_version"] = parsed.version
+            row["ip_key"] = ipaddr.ip_sort_key(parsed)
+    elif type_ == "network":
+        try:
+            net = ipaddress.ip_network(value, strict=False)
+            if ipaddr.is_globally_routable(net):
+                row["network"] = str(net)
+                row["family"] = net.version
+                row["prefix"] = net.prefixlen
+                row["start_key"] = ipaddr.ip_sort_key(net.network_address)
+                row["start_int"] = int(net.network_address) if net.version == 4 else None
+        except ValueError:
+            pass
+    return row
 
 
 def run_source(source: SourceConfig, fetch_fn: FetchFn, run_time: datetime) -> SourceOutput:
-    """Run one source through fetch -> parse -> map -> clean -> classify.
+    """Run every feed of a source, producing one unified indicator frame.
 
-    A failing fetch or parse marks the source ``failed``/``partial`` but never
-    raises, so a single source cannot bring the whole run down. A mid-
-    pagination failure (e.g. an OTX 504 after several successful pages) keeps
-    the pages already fetched and marks the source ``partial``.
+    Each feed is fetched/parsed independently and its status aggregated:
+    ``ok`` if all feeds succeed, ``partial`` if some succeed/fail/skip, ``skipped``
+    if every feed lacks its required secret, ``failed`` if none succeed. The
+    ``sources`` column carries the origin id, so indicators confirmed by several
+    feeds of the same origin count as one confirming source for scoring.
     """
+    frames: list[pl.DataFrame] = []
+    statuses: list[SourceStatus] = []
+    records = 0
+    for feed in source.feeds:
+        status, df, recs = _run_feed(source, feed, fetch_fn, run_time)
+        statuses.append(status)
+        records += recs
+        if not df.is_empty():
+            frames.append(df)
+
+    if not frames:
+        return SourceOutput(source.id, _aggregate_status(statuses), records, _empty_df())
+    combined = pl.concat(frames, how="vertical_relaxed") if len(frames) > 1 else frames[0]
+    return SourceOutput(source.id, _aggregate_status(statuses), records, combined)
+
+
+def _aggregate_status(statuses: list[SourceStatus]) -> SourceStatus:
+    if not statuses:
+        return "failed"
+    if "ok" in statuses:
+        return "ok" if all(s == "ok" for s in statuses) else "partial"
+    if "partial" in statuses:
+        return "partial"
+    if all(s == "skipped" for s in statuses):
+        return "skipped"
+    return "failed"
+
+
+def _run_feed(
+    source: SourceConfig,
+    feed: FeedConfig,
+    fetch_fn: FetchFn,
+    run_time: datetime,
+) -> tuple[SourceStatus, pl.DataFrame, int]:
     text = ""
     partial = False
     try:
-        text = fetch_fn(source)
+        text = fetch_fn(source, feed)
     except PartialFetchError as exc:
         text = exc.partial_text
         partial = True
-    except Exception:  # noqa: BLE001 - intentionally tolerant
-        return SourceOutput(source.id, "failed", 0, _empty_ip(), _empty_network())
+    except MissingSecret as exc:
+        logger.warning("%s", exc)
+        return ("skipped", _empty_df(), 0)
+    except Exception as exc:  # noqa: BLE001 - intentionally tolerant
+        logger.warning("source %s feed %s failed: %s", source.id, feed.fixture_key(), exc)
+        return ("failed", _empty_df(), 0)
 
     if not text.strip():
-        return SourceOutput(source.id, "partial", 0, _empty_ip(), _empty_network())
+        return ("partial", _empty_df(), 0)
 
     try:
-        raw_rows = parse_rows(text, source.parse)
+        raw_rows = parse_rows(text, feed.parse)
     except Exception:  # noqa: BLE001
-        return SourceOutput(source.id, "partial", 0, _empty_ip(), _empty_network())
+        return ("partial", _empty_df(), 0)
 
-    ctx = OpContext(source_id=source.id, run_time=run_time)
+    ctx = OpContext(source_id=f"{source.id}:{feed.fixture_key()}", run_time=run_time)
 
     mapped: list[Row] = []
     for raw_row in raw_rows:
         row: Row = dict(raw_row)
-        for normalized, ref in source.fields.items():
-            row[normalized] = _resolve_raw(raw_row, ref)
+        for norm, ref in feed.fields.items():
+            row[norm] = _resolve_raw(raw_row, ref)
         mapped.append(row)
 
-    cleaned = apply_clean_ops(mapped, source.clean, ctx)
+    cleaned = apply_clean_ops(mapped, feed.clean, ctx)
 
-    ip_rows: list[Row] = []
-    net_rows: list[Row] = []
-    ip_output = "ip" in source.output_types
-    net_output = "network" in source.output_types
-    for row in cleaned:
-        if ip_output:
-            ip_row = _build_ip_row(row, source)
-            if ip_row is not None:
-                ip_rows.append(ip_row)
-        if net_output:
-            net_row = _build_network_row(row, source)
-            if net_row is not None:
-                net_rows.append(net_row)
+    built: list[Row] = []
+    if feed.value_field and feed.type_field:
+        built = _route_by_type(cleaned, source, feed)
+    else:
+        for row in cleaned:
+            for type_ in feed.output_types:
+                if feed.fields.get(type_) is None:
+                    continue
+                # Read the *normalized* value (clean ops may have rewritten it,
+                # e.g. regex_extract on a plain-line feed).
+                raw_val = row.get(type_)
+                if raw_val is None:
+                    continue
+                rec = _common_row(type_, str(raw_val), row, source, feed)
+                if rec is not None:
+                    built.append(_with_extras(rec, row))
 
-    ip_df = _df_from_rows(ip_rows, IP_COLUMNS, ip=True)
-    net_df = _df_from_rows(net_rows, NETWORK_COLUMNS, ip=False)
+    df = _df_from_rows(built)
     status: SourceStatus = "partial" if partial else "ok"
-    return SourceOutput(source.id, status, len(cleaned), ip_df, net_df)
+    return (status, df, len(cleaned))
 
 
-def _empty_ip() -> pl.DataFrame:
-    return _df_from_rows([], IP_COLUMNS, ip=True)
+def _route_by_type(rows: list[Row], source: SourceConfig, feed: FeedConfig) -> list[Row]:
+    """Type-routed feeds (OTX): classify each row by its type field value."""
+    assert feed.value_field and feed.type_field
+    allowed = set(feed.output_types)
+    out: list[Row] = []
+    for row in rows:
+        raw_type = row.get(feed.type_field)
+        mapped = feed.type_map.get(str(raw_type))
+        if mapped is None or mapped not in allowed:
+            continue
+        value = row.get(feed.value_field)
+        if value is None:
+            continue
+        rec = _common_row(mapped, str(value), row, source, feed)
+        if rec is not None:
+            out.append(_with_extras(rec, row))
+    return out
 
 
-def _empty_network() -> pl.DataFrame:
-    return _df_from_rows([], NETWORK_COLUMNS, ip=False)
+def _empty_df() -> pl.DataFrame:
+    schema = {c: _dtype(c) for c in ALL_COLUMNS}
+    return pl.DataFrame(schema=schema)
 
 
-def _df_from_rows(rows: list[Row], columns: tuple[str, ...], ip: bool) -> pl.DataFrame:
+def _dtype(col: str) -> pl.DataType:
+    if col in ("sources", "categories"):
+        return pl.List(pl.Utf8())
+    if col == "last_seen":
+        return pl.Datetime(time_unit="us", time_zone="UTC")
+    if col in ("ip_int", "start_int", "asn"):
+        return pl.Int64()
+    if col in ("ip_version", "family"):
+        return pl.Int8()
+    if col == "prefix":
+        return pl.Int32()
+    return pl.Utf8()
+
+
+def _df_from_rows(rows: list[Row]) -> pl.DataFrame:
     if not rows:
-        schema: dict[str, pl.DataType] = {}
-        for col in columns:
-            if col == "sources" or col == "categories":
-                schema[col] = pl.List(pl.Utf8())
-            elif col == "last_seen":
-                schema[col] = pl.Datetime(time_unit="us", time_zone="UTC")
-            elif col in ("ip_int", "start_int"):
-                schema[col] = pl.Int64()
-            elif col in ("ip_version", "family"):
-                schema[col] = pl.Int8()
-            elif col == "prefix":
-                schema[col] = pl.Int32()
-            else:
-                schema[col] = pl.Utf8()
-        return pl.DataFrame(schema=schema)
+        return _empty_df()
     df = pl.DataFrame(rows)
-    return df.select(*columns)
+    for col in ALL_COLUMNS:
+        if col not in df.columns:
+            df = df.with_columns(pl.lit(None, dtype=_dtype(col)).alias(col))
+    return df.select(*ALL_COLUMNS)

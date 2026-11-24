@@ -6,6 +6,11 @@ __pycache__/
 dist/
 build/
 
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
 # uv
 .uv/
 
@@ -27,5 +32,5 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
-.env
-.env.local
+
+.kilo/*

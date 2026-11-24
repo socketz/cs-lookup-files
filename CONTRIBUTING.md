@@ -27,7 +27,9 @@ uv run mypy src               # type check
 2. Add a small sample feed at `fixtures/<source_id>` if you want an offline test.
 3. Run `uv run cs-lookup-files validate` to check the schema.
 4. Add/adjust a test in `tests/` demonstrating the source works end-to-end.
-5. Never hardcode API keys; use `$VAR` header references.
+5. Never hardcode API keys; use `$VAR` header references (configured in
+   `.env` from `.env.example`, the shell, or CI env). Missing keys skip the
+   source until configured.
 
 Example:
 

@@ -6,11 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class IndicatorState(BaseModel):
-    """Persisted observation history for one IP or network."""
+    """Persisted observation history for one IP, network or other IOC."""
 
     model_config = ConfigDict(extra="forbid")
 
-    value: str  # display value (IP address or canonical CIDR)
+    type: str  # indicator type: ip | network | domain | md5 | sha256
+    value: str  # display value (IP address, canonical CIDR, domain, hash)
     first_seen: datetime
     last_seen: datetime
     sources: dict[str, int] = Field(default_factory=dict)

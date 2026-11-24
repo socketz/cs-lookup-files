@@ -1,118 +1,567 @@
-# Per-source ETL configuration. Adding a source = appending a block here;
-# no core code changes are required (see docs/sources.md).
+# Per-source ETL configuration (JSON Schema: config/sources.schema.json).
 #
-# API keys are referenced as $ENV_VAR and resolved from the runtime
-# environment (set via the workflow env: block). They never appear in this file.
+# A "source" is an origin/vendor (e.g. firehol) and owns an array of "feeds"
+# (files/URLs). The scoring identity is the source id, so indicators confirmed
+# by several feeds of the same origin count as ONE confirming source.
+#
+# Each source has a global `weight` and an optional per-IOC-type `ioc_weights`
+# (ip/network/domain/url/md5/sha256/email). Each feed declares the IOC types it
+# yields plus its own fetch/parse/fields/clean (and optional category override).
+#
+# Adding a feed is config-only; no core code changes are required.
+#
+# API keys are referenced as $ENV_VAR and resolved from the runtime environment
+# (shell, workflow env:, or a local .env via python-dotenv; real env vars take
+# precedence). They never appear in this file. A source whose key is not
+# configured is SKIPPED (not failed) until the key is provided.
+#
+# Selection criterion: only feeds with frequent updates are enabled (every 15
+# minutes to every few days). Obsolete sets (no updates for months) are excluded.
 
 sources:
+  # ---------------------------------------------------------------- FireHOL
+  # FireHOL mirrors many high-churn sets. One origin, several feed URLs.
   - id: firehol
     enabled: true
     weight: 85
-    output_types: [ip, network]
-    categories:
-      default: [blocklist]
-    fetch:
-      url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset
-      timeout_seconds: 120
-      retries: 3
-    parse:
-      format: ipset
-      comment_prefix: "#"
-    fields:
-      ip: ip_or_cidr
-      network: ip_or_cidr
-    clean:
-      - {op: drop_private}
-      - {op: require_globally_routable}
+    categories: {default: [blocklist]}
+    feeds:
+      # Composite level1 (aggregate of the most recommended lists).
+      - id: firehol_level1
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset
+          timeout_seconds: 120
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip, network]
+        fields: {ip: ip_or_cidr, network: ip_or_cidr}
+        clean:
+          - {op: drop_private}
+          - {op: require_globally_routable}
 
-  - id: spamhaus_drop
+      # Abuse.ch Feodo bad IPs (every 30 min).
+      - id: feodo_badips
+        categories: {default: [malware_c2]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/feodo_badips.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # C2 Tracker (weekly).
+      - id: c2_tracker
+        categories: {default: [malware_c2]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/c2_tracker.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # CyberCrime C2 tracker (every 12h).
+      - id: cybercrime
+        categories: {default: [malware_c2]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/cybercrime.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # Emerging Threats compromised hosts (every 12h).
+      - id: et_compromised
+        categories: {default: [malware]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/et_compromised.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # Blocklist.de fail2ban (every 15 min).
+      - id: blocklist_de
+        categories: {default: [abuse]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/blocklist_de.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # CI Army (every 3h).
+      - id: ciarmy
+        categories: {default: [scanner]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/ciarmy.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # GreenSnow (every 30 min).
+      - id: greensnow
+        categories: {default: [scanner]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/greensnow.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # DShield top attackers mirror (every 10 min).
+      - id: dshield
+        categories: {default: [scanner]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/dshield.netset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [network]
+        fields: {network: ip_or_cidr}
+        clean: [{op: drop_bogon_networks}]
+
+      # Bruteforceblocker SSH (every 3h).
+      - id: bruteforceblocker
+        categories: {default: [scanner]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/bruteforceblocker.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # Stopforumspam (daily).
+      - id: stopforumspam
+        categories: {default: [spam]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/stopforumspam.ipset
+          timeout_seconds: 60
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+      # CyberCure infection sensors (every 6h).
+      - id: cybercure
+        categories: {default: [malware]}
+        fetch:
+          url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/cybercure.ipset
+          timeout_seconds: 120
+        parse: {format: ipset, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: ip_or_cidr}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+  # ------------------------------------------------------------- Spamhaus
+  - id: spamhaus
     enabled: true
     weight: 100
-    output_types: [network]
-    categories:
-      default: [blocklist]
-    fetch:
-      url: https://www.spamhaus.org/drop/drop.txt
-      timeout_seconds: 60
-      retries: 3
-    parse:
-      format: cidr_lines
-      comment_prefix: ";"
-    fields:
-      network: cidr
-    clean:
-      - {op: drop_bogon_networks}
+    categories: {default: [blocklist]}
+    feeds:
+      - id: spamhaus_drop
+        fetch:
+          url: https://www.spamhaus.org/drop/drop.txt
+          timeout_seconds: 60
+        parse: {format: cidr_lines, comment_prefix: ";"}
+        output_types: [network]
+        fields: {network: cidr}
+        clean: [{op: drop_bogon_networks}]
 
-  - id: abusech_feodo
+  # --------------------------------------------------------------- Abuse.ch
+  - id: abusech
     enabled: true
     weight: 90
-    output_types: [ip]
-    categories:
-      default: [malware_c2]
-    fetch:
-      url: https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
-      timeout_seconds: 60
-      retries: 3
-    parse:
-      format: plain_lines
-      comment_prefix: "#"
-    fields:
-      ip: line
-    clean:
-      - {op: parse_and_validate_ip}
+    ioc_weights: {ip: 92}
+    categories: {default: [malware_c2]}
+    feeds:
+      - id: abusech_feodo
+        fetch:
+          url: https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: line}
+        clean: [{op: parse_and_validate_ip}]
 
+  # --------------------------------------------------------------- AbuseIPDB
   - id: abuseipdb
     enabled: true
     weight: 80
-    output_types: [ip]
-    categories:
-      default: [abuse]
-    fetch:
-      url: https://api.abuseipdb.com/api/v2/blacklist
-      params:
-        confidenceMinimum: 90
-      headers:
-        Key: "$ABUSEIPDB_API_KEY"
-        Accept: "application/json"
-      timeout_seconds: 60
-      retries: 3
-    parse:
-      format: json
-      records: "data.list"
-    fields:
-      ip: ipAddress
-      last_seen: lastReportedAt
-    clean:
-      - {op: field_ge, field: abuseConfidenceScore, value: 90}
+    categories: {default: [abuse]}
+    feeds:
+      - id: abuseipdb
+        fetch:
+          url: https://api.abuseipdb.com/api/v2/blacklist
+          params: {confidenceMinimum: 90}
+          headers:
+            Key: "$ABUSEIPDB_API_KEY"
+            Accept: "application/json"
+          timeout_seconds: 60
+          requests_per_minute: 30
+        parse: {format: json, records: "data.list"}
+        output_types: [ip]
+        fields: {ip: ipAddress, last_seen: lastReportedAt}
+        clean:
+          - {op: field_ge, field: abuseConfidenceScore, value: 90}
 
+  # ----------------------------------------------------------------- DShield
+  # DShield intelfeed: notable IPs, updated daily. Label -> category mapping;
+  # only threat labels are kept (benign infrastructure is filtered out).
+  - id: dshield
+    enabled: true
+    weight: 70
+    categories:
+      default: [scanner]
+      field: description
+      mapping:
+        webscanner: [scanner]
+        miner: [botnet]
+        dshieldssh: [scanner]
+        malwaretrafficanalysis: [malware]
+        emergingthreats: [blocklist]
+    feeds:
+      - id: dshield_intelfeed
+        fetch:
+          url: https://isc.sans.edu/api/intelfeed
+          params: {json: "1"}
+          timeout_seconds: 180
+          requests_per_minute: 20
+        parse: {format: json, records: "$"}
+        output_types: [ip]
+        fields: {ip: ip}
+        clean:
+          - {op: field_in, field: description, values: [webscanner, miner, dshieldssh, malwaretrafficanalysis, emergingthreats]}
+          - {op: parse_and_validate_ip}
+          - {op: drop_private}
+
+  # ------------------------------------------------------- AlienVault OTX
+  # Multi-type export (IPv4/IPv6/domain/url/md5/sha256/email), continuous.
+  # Key via $OTX_API_KEY env var; the .env file is never read by code.
   - id: alienvault_otx
     enabled: true
     weight: 70
-    output_types: [ip]
-    categories:
-      default: [malware]
-    fetch:
-      url: https://otx.alienvault.com/api/v1/indicators/export
-      headers:
-        X-OTX-API-KEY: "$OTX_API_KEY"
-      pagination:
-        param: page
-        size_param: limit
-        size: 500
-        max_pages: 200
-        stop_when_empty: true
-      timeout_seconds: 60
-      retries: 3
-    parse:
-      format: csv
-      delimiter: ","
-      has_header: true
-    fields:
-      type: "0"
-      ip: "1"
-    clean:
-      # Export lines look like: "type","indicator","pulse_name",...
-      # Accept only bare IPv4/IPv6 indicators before further cleaning.
-      - {op: field_in, field: type, values: [IPv4, IPv6]}
-      - {op: parse_and_validate_ip}
-      - {op: drop_private}
+    categories: {default: [malware]}
+    feeds:
+      - id: alienvault_otx
+        fetch:
+          url: https://otx.alienvault.com/api/v1/indicators/export
+          headers: {X-OTX-API-KEY: "$OTX_API_KEY"}
+          pagination:
+            param: page
+            size_param: limit
+            size: 500
+            max_pages: 200
+            # Bound wall-clock so a slow/throttled OTX never breaks the SLA.
+            max_seconds: 240
+            stop_when_empty: true
+          timeout_seconds: 60
+          requests_per_minute: 120
+          retries: 3
+        parse: {format: csv, delimiter: ",", has_header: true}
+        output_types: [ip, domain, url, md5, sha256, email]
+        type_field: "0"
+        value_field: "1"
+        type_map:
+          IPv4: ip
+          IPv6: ip
+          ipv4: ip
+          ipv6: ip
+          domain: domain
+          hostname: domain
+          url: url
+          URL: url
+          filehash-md5: md5
+          filehash-sha256: sha256
+          email: email
+          Email: email
+        fields: {ip: "1", domain: "1", url: "1", md5: "1", sha256: "1", email: "1"}
+        clean: []
+
+  # ------------------------------------------------- Wave 1: extra IP feeds
+  - id: cins
+    enabled: true
+    weight: 75
+    categories: {default: [blocklist]}
+    feeds:
+      - id: cins_army
+        fetch:
+          url: https://cinsscore.com/list/ci-badguys.txt
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: line}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+  - id: ipsum
+    enabled: true
+    weight: 78
+    categories: {default: [blocklist]}
+    feeds:
+      - id: ipsum
+        fetch:
+          url: https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt
+          timeout_seconds: 90
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: line}
+        clean:
+          - op: regex_extract
+            field: line
+            # Grab the leading IP (the value stops before the tab/count).
+            pattern: '^([0-9a-fA-F.:]+)'
+            output: ip
+          - {op: parse_and_validate_ip}
+          - {op: drop_private}
+
+  - id: c2intelfeeds
+    enabled: true
+    weight: 82
+    ioc_weights: {ip: 85}
+    categories: {default: [malware_c2]}
+    feeds:
+      - id: c2_intelfeeds
+        fetch:
+          url: https://raw.githubusercontent.com/drb-ra/C2IntelFeeds/master/feeds/IPC2s-30day.csv
+          timeout_seconds: 60
+        parse: {format: csv, delimiter: ",", has_header: true}
+        output_types: [ip]
+        fields: {ip: "#ip"}
+        clean: [{op: drop_private}]
+
+  # --------------------------------- ThreatFeeds.io (Status 200) additions
+  # Feeds verified reachable (HTTP 200) on threatfeeds.io, not already covered.
+
+  # AlienVault IP reputation (CSV with '#' separator): ip#risk#...#type#country.
+  - id: alienvault_reputation
+    enabled: true
+    weight: 78
+    categories: {default: [blocklist]}
+    feeds:
+      - id: alienvault_rep
+        fetch:
+          url: http://reputation.alienvault.com/reputation.data
+          timeout_seconds: 60
+        parse: {format: csv, delimiter: "#", has_header: false}
+        output_types: [ip]
+        fields: {ip: "0"}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+  # BBcan177 (pfBlockerNG) malicious IPs + IRC-botnet DNSBL domains.
+  - id: bbcan177
+    enabled: true
+    weight: 70
+    feeds:
+      - id: bbcan177_ips
+        categories: {default: [malware]}
+        fetch:
+          url: https://gist.githubusercontent.com/BBcan177/bf29d47ea04391cb3eb0/raw/
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: line}
+        clean:
+          - op: regex_extract
+            field: line
+            pattern: '^([0-9a-fA-F.:]+)'
+            output: ip
+          - {op: parse_and_validate_ip}
+          - {op: drop_private}
+      - id: bbcan177_dnsbl
+        categories: {default: [malware]}
+        fetch:
+          url: https://gist.githubusercontent.com/BBcan177/4a8bf37c131be4803cb2/raw
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [domain]
+        fields: {domain: line}
+        clean: []
+
+  # Botvrij.eu per-type IOC files.
+  - id: botvrij
+    enabled: true
+    weight: 72
+    categories: {default: [malware]}
+    feeds:
+      - id: botvrij_ips
+        fetch: {url: "http://www.botvrij.eu/data/ioclist.ip-dst.raw", timeout_seconds: 60}
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: line}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+      - id: botvrij_domains
+        fetch: {url: "http://www.botvrij.eu/data/ioclist.domain.raw", timeout_seconds: 60}
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [domain]
+        fields: {domain: line}
+        clean: []
+      - id: botvrij_hostnames
+        fetch: {url: "http://www.botvrij.eu/data/ioclist.hostname.raw", timeout_seconds: 60}
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [domain]
+        fields: {domain: line}
+        clean: []
+      - id: botvrij_urls
+        fetch: {url: "http://www.botvrij.eu/data/ioclist.url.raw", timeout_seconds: 60}
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [url]
+        fields: {url: line}
+        clean: []
+
+  # James Brine brute-force hosts (CSV: ipv4, activity, date).
+  - id: jamesbrine
+    enabled: true
+    weight: 70
+    categories: {default: [scanner]}
+    feeds:
+      - id: bruteforce_hosts
+        fetch:
+          url: https://jamesbrine.com.au/csv
+          timeout_seconds: 120
+        parse: {format: csv, delimiter: ",", has_header: true}
+        output_types: [ip]
+        # Header is literally "ipv4,..."; map by index to avoid the parser's
+        # IPv4/IPv6 header sniff treating it as a data row.
+        fields: {ip: "0"}
+        clean: [{op: parse_and_validate_ip}, {op: drop_private}]
+
+  # joewein.net domains blacklist.
+  - id: joewein
+    enabled: true
+    weight: 65
+    categories: {default: [spam]}
+    feeds:
+      - id: joewein_domains
+        fetch:
+          url: http://www.joewein.net/dl/bl/dom-bl.txt
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [domain]
+        fields: {domain: line}
+        clean: []
+
+  # LinuxTracker Hancitor malspam sending IPs.
+  - id: linuxtracker
+    enabled: true
+    weight: 72
+    categories: {default: [malware]}
+    feeds:
+      - id: hancitor_ips
+        fetch:
+          url: https://raw.githubusercontent.com/LinuxTracker/Blocklists/master/HancitorIPs.txt
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [ip]
+        fields: {ip: line}
+        clean:
+          - op: regex_extract
+            field: line
+            pattern: '^([0-9a-fA-F.:]+)'
+            output: ip
+          - {op: parse_and_validate_ip}
+          - {op: drop_private}
+
+  # Miner check host list (domains).
+  - id: minerchk
+    enabled: true
+    weight: 70
+    categories: {default: [botnet]}
+    feeds:
+      - id: minerchk_domains
+        fetch:
+          url: https://raw.githubusercontent.com/Hestat/minerchk/master/hostslist.txt
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [domain]
+        fields: {domain: line}
+        clean: []
+
+  # NoCoin adblock hosts (0.0.0.0 domain) -> domains.
+  - id: nocoin
+    enabled: true
+    weight: 65
+    categories: {default: [botnet]}
+    feeds:
+      - id: nocoin_domains
+        fetch:
+          url: https://raw.githubusercontent.com/hoshsadiq/adblock-nocoin-list/master/hosts.txt
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [domain]
+        fields: {domain: line}
+        clean:
+          - op: regex_extract
+            field: line
+            pattern: '^\s*(?:0\.0\.0\.0|127\.0\.0\.1)\s+(\S+)'
+            output: domain
+
+  # OpenPhish (plain URL list).
+  - id: openphish
+    enabled: true
+    weight: 80
+    ioc_weights: {url: 85}
+    categories: {default: [phishing]}
+    feeds:
+      - id: openphish
+        fetch:
+          url: https://openphish.com/feed.txt
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [url]
+        fields: {url: line}
+        clean: []
+
+  # PhishTank online-valid (CSV with a 'url' column).
+  - id: phishtank
+    enabled: true
+    weight: 80
+    ioc_weights: {url: 85}
+    categories: {default: [phishing]}
+    feeds:
+      - id: phishtank
+        fetch:
+          url: http://data.phishtank.com/data/online-valid.csv
+          timeout_seconds: 120
+          requests_per_minute: 20
+        parse: {format: csv, delimiter: ",", has_header: true}
+        output_types: [url]
+        fields: {url: url}
+        clean: []
+
+  # Disconnect.me simple malware list (domains; header line is dropped by
+  # domain validation since it contains spaces).
+  - id: disconnect
+    enabled: true
+    weight: 65
+    categories: {default: [malware]}
+    feeds:
+      - id: simple_malware
+        fetch:
+          url: https://s3.amazonaws.com/lists.disconnect.me/simple_malware.txt
+          timeout_seconds: 60
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [domain]
+        fields: {domain: line}
+        clean: []
+
+  # Viriback C2 tracker (CSV: Family,URL,IP,FirstSeen) -> IPs + URLs.
+  - id: viriback
+    enabled: true
+    weight: 80
+    ioc_weights: {ip: 82, url: 78}
+    categories: {default: [malware_c2]}
+    feeds:
+      - id: viriback_c2
+        fetch:
+          url: https://tracker.viriback.com/dump.php
+          timeout_seconds: 120
+        parse: {format: csv, delimiter: ",", has_header: true}
+        output_types: [ip, url]
+        fields: {ip: IP, url: URL}
+        clean: [{op: drop_private}]

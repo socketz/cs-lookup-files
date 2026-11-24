@@ -17,6 +17,49 @@ def _error(status_code: int, url: str) -> httpx.HTTPStatusError:
     )
 
 
+def test_resolve_env_ref_plain_passthrough(monkeypatch):
+    assert fetch.resolve_env_ref("application/json") == "application/json"
+
+
+def test_resolve_env_ref_present(monkeypatch):
+    monkeypatch.setenv("FAKE_KEY", "abcdef")
+    assert fetch.resolve_env_ref("$FAKE_KEY") == "abcdef"
+
+
+def test_resolve_env_ref_missing_is_none(monkeypatch):
+    monkeypatch.delenv("DOES_NOT_EXIST", raising=False)
+    assert fetch.resolve_env_ref("$DOES_NOT_EXIST") is None
+
+
+def test_resolve_env_ref_empty_is_none(monkeypatch):
+    # A blank `KEY=` in .env must be treated as unconfigured.
+    monkeypatch.setenv("EMPTY_KEY", "")
+    assert fetch.resolve_env_ref("$EMPTY_KEY") is None
+
+
+def test_fetch_missing_secret_raises_missing_secret(monkeypatch):
+    monkeypatch.delenv("REQUIRED_KEY", raising=False)
+    cfg = FetchConfig(url="https://example.org/api", headers={"Key": "$REQUIRED_KEY"})
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def get(self, *a, **k):
+            raise AssertionError("get should not be called (secret missing)")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(fetch.httpx, "Client", _Client)
+    try:
+        fetch.fetch_text(cfg)
+    except fetch.MissingSecret as exc:
+        assert exc.var == "REQUIRED_KEY"
+    else:
+        raise AssertionError("expected MissingSecret")
+
+
 def test_plain_fetch_returns_body(monkeypatch):
     cfg = FetchConfig(url="https://example.org/feed.txt")
 

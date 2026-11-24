@@ -30,6 +30,10 @@ asn:
   # ip2asn snapshots refresh slowly; reuse the cache within this window.
   cache_ttl_hours: 6
 
+# Source downloads run concurrently, bounded, keeping each host's rate limits.
+# Individual sources can further lower their own rate via requests_per_minute.
+max_workers: 6
+
 output:
   dir: output
   # Exact column order follows AGENTS.md; exported CSV/JSON share it.
@@ -60,3 +64,43 @@ output:
     - malicious_ip_count
     - source_count
     - sources
+  domain_columns:
+    - domain
+    - confidence_score
+    - source_count
+    - sources
+    - categories
+    - first_seen
+    - last_seen
+  md5_columns:
+    - md5
+    - confidence_score
+    - source_count
+    - sources
+    - categories
+    - first_seen
+    - last_seen
+  sha256_columns:
+    - sha256
+    - confidence_score
+    - source_count
+    - sources
+    - categories
+    - first_seen
+    - last_seen
+  url_columns:
+    - url
+    - confidence_score
+    - source_count
+    - sources
+    - categories
+    - first_seen
+    - last_seen
+  email_columns:
+    - email
+    - confidence_score
+    - source_count
+    - sources
+    - categories
+    - first_seen
+    - last_seen

@@ -10,17 +10,22 @@ LogScale hunts, and correlation rules.
 
 ## Outputs
 
-Three lookup files, plus JSON mirrors and metadata:
+Nine lookup files, plus JSON mirrors and metadata:
 
-| Dataset            | Purpose                                              |
-|--------------------|------------------------------------------------------|
-| `malicious_ips`    | Match remote IPs in network, DNS, proxy and EDR logs |
-| `malicious_networks` | Subnet reputation and network-level investigations |
-| `malicious_asns`   | Provider-level infrastructure reputation            |
+| Dataset                | Purpose                                              |
+|------------------------|------------------------------------------------------|
+| `malicious_ips`        | Match IPv4/IPv6 in network, DNS, proxy and EDR logs  |
+| `malicious_networks`   | Subnet (CIDR) reputation and network investigations  |
+| `malicious_asns`       | Provider-level infrastructure reputation             |
+| `malicious_domains`    | Hostname / domain reputation                          |
+| `malicious_urls`       | URL / URI reputation                                  |
+| `malicious_md5`        | MD5 file hashes                                      |
+| `malicious_sha256`     | SHA256 file hashes                                   |
+| `malicious_emails`     | Sender / phishing email addresses                    |
 
-Each row is deduplicated, enriched with ASN info, scored 0–100 and time-boxed
-by first/last observation. See [`docs/`](docs/) for the scoring model,
-CrowdStrike integration examples, and source catalogue.
+Each row is deduplicated, ASN-enriched (for IPs/networks), scored 0–100 and
+time-boxed by first/last observation. See [`docs/`](docs/) for the scoring
+model, source catalogue, and CrowdStrike integration examples.
 
 ### Example `malicious_ips.csv`
 
@@ -59,11 +64,16 @@ GitHub Actions runs the pipeline every 6 hours and publishes a versioned GitHub
 Release. Consumers use the stable URLs:
 
 ```
-https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_ips.csv
-https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_networks.csv
-https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_asns.csv
-https://github.com/socketz/cs-lookup-files/releases/latest/download/metadata.json
-https://github.com/socketz/cs-lookup-files/releases/latest/download/state.json
+https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_ips.csv
+https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_networks.csv
+https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_asns.csv
+https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_domains.csv
+https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_urls.csv
+https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_md5.csv
+https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_sha256.csv
+https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_emails.csv
+https://github.com/<org>/cs-lookup-files/releases/latest/download/metadata.json
+https://github.com/<org>/cs-lookup-files/releases/latest/download/state.json
 ```
 
 `state.json` carries observation history so indicators persist across runs and
@@ -73,9 +83,21 @@ confidence decays with age, not on every rebuild.
 
 - `config/sources.yaml` — ETL for each feed (add a source by appending a block; no code changes).
 - `config/settings.yaml` — scoring thresholds, ip2asn endpoints, output columns.
+- `config/sources.schema.json` / `config/settings.schema.json` — JSON Schema
+  describing the accepted config structure (regenerated via `cs-lookup-files schema`).
 
-API keys are read from environment variables (`$VAR` references in headers) and
-are set in the workflow's `env:` block — never committed.
+Supported indicator types: `ip`, `network` (CIDR), `domain` (hostname),
+`url`, `md5`, `sha256`, `email`. Each source declares its `output_types`; feeds
+that classify rows by a type/value pair (e.g. OTX) use `type_field` +
+`value_field` + `type_map`.
+
+API keys referenced as `$VAR` in config are resolved from the shell environment,
+the CI workflow `env:` block, or a local `.env` loaded at startup (python-dotenv;
+real env vars take precedence). Copy `.env.example` to `.env` to configure them.
+A source whose required key is missing is **skipped** (not failed) until the key
+is configured, so a fresh clone works without any secrets. Optional per-source
+`requests_per_minute` keeps parallel fetches polite; global `max_workers`
+bounds concurrency in `settings.yaml`.
 
 ## Development
 

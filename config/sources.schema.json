@@ -1,0 +1,528 @@
+{
+  "$defs": {
+    "CategoriesConfig": {
+      "additionalProperties": false,
+      "description": "How raw category labels map into the canonical vocabulary for a source.\n\n``default`` applies to every row when no per-row label is available. When\n``field`` is set, the engine reads that raw column and maps each value via\n``mapping``; values missing from the mapping fall back to ``default``.",
+      "properties": {
+        "default": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "title": "Default"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "mapping": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Mapping",
+          "type": "object"
+        }
+      },
+      "title": "CategoriesConfig",
+      "type": "object"
+    },
+    "CleanOp": {
+      "additionalProperties": false,
+      "description": "One row-level operation, e.g. ``{op: field_in, field: type, values: [IPv4]}``.\n\nParameters are intentionally generic; each op in ``normalizers.ops`` reads\nthe keys it needs and configuration validation rejects unknown op names.",
+      "properties": {
+        "op": {
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Values"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pattern"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output"
+        },
+        "mapping": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mapping"
+        },
+        "prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prefix"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "CleanOp",
+      "type": "object"
+    },
+    "FeedConfig": {
+      "additionalProperties": false,
+      "description": "One file/URL within a source: how to fetch, parse and clean it.\n\nA *source* (e.g. ``firehol``) groups several feeds (URLs); each feed declares\nthe IOC types it yields and its own parser/field mapping/clean ops.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "fetch": {
+          "$ref": "#/$defs/FetchConfig"
+        },
+        "parse": {
+          "$ref": "#/$defs/ParseConfig"
+        },
+        "output_types": {
+          "items": {
+            "enum": [
+              "ip",
+              "network",
+              "domain",
+              "url",
+              "md5",
+              "sha256",
+              "email"
+            ],
+            "type": "string"
+          },
+          "title": "Output Types",
+          "type": "array"
+        },
+        "fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Fields",
+          "type": "object"
+        },
+        "type_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Type Field"
+        },
+        "value_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Field"
+        },
+        "type_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Type Map",
+          "type": "object"
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CategoriesConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "clean": {
+          "items": {
+            "$ref": "#/$defs/CleanOp"
+          },
+          "title": "Clean",
+          "type": "array"
+        }
+      },
+      "required": [
+        "fetch",
+        "parse",
+        "output_types"
+      ],
+      "title": "FeedConfig",
+      "type": "object"
+    },
+    "FetchConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "pattern": "^https?://",
+          "title": "Url",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "title": "Params",
+          "type": "object"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "pagination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaginationConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "timeout_seconds": {
+          "default": 60.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "retries": {
+          "default": 3,
+          "title": "Retries",
+          "type": "integer"
+        },
+        "requests_per_minute": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requests Per Minute"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "FetchConfig",
+      "type": "object"
+    },
+    "PaginationConfig": {
+      "additionalProperties": false,
+      "description": "Loop-based pagination for text/JSON feeds.\n\n``param`` is the query parameter incremented per page (default ``page``).\n``size_param``/``size`` set the per-page size. Fetching stops when a page\nreturns nothing, ``max_pages`` is reached, or the wall-clock budget\n``max_seconds`` is exhausted (so one slow feed cannot break the pipeline\nSLA). Whatever was fetched before the budget is kept.",
+      "properties": {
+        "param": {
+          "default": "page",
+          "title": "Param",
+          "type": "string"
+        },
+        "size_param": {
+          "default": "limit",
+          "title": "Size Param",
+          "type": "string"
+        },
+        "size": {
+          "default": 1000,
+          "title": "Size",
+          "type": "integer"
+        },
+        "max_pages": {
+          "default": 100,
+          "title": "Max Pages",
+          "type": "integer"
+        },
+        "stop_when_empty": {
+          "default": true,
+          "title": "Stop When Empty",
+          "type": "boolean"
+        },
+        "total_pages_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Pages Field"
+        },
+        "max_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Seconds"
+        }
+      },
+      "title": "PaginationConfig",
+      "type": "object"
+    },
+    "ParseConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "enum": [
+            "plain_lines",
+            "ipset",
+            "cidr_lines",
+            "csv",
+            "tsv",
+            "json"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "comment_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comment Prefix"
+        },
+        "has_header": {
+          "default": false,
+          "title": "Has Header",
+          "type": "boolean"
+        },
+        "delimiter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delimiter"
+        },
+        "records": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Records"
+        },
+        "skip_lines": {
+          "default": 0,
+          "title": "Skip Lines",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "format"
+      ],
+      "title": "ParseConfig",
+      "type": "object"
+    },
+    "SourceConfig": {
+      "additionalProperties": false,
+      "description": "An intelligence source/origin (e.g. ``firehol``) and its feed URLs.\n\nThe scoring identity is the **source** (origin), so indicators coming from\nseveral feeds of the same origin count as one confirming source.",
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9_]+$",
+          "title": "Id",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "weight": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Weight",
+          "type": "integer"
+        },
+        "ioc_weights": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Ioc Weights",
+          "type": "object"
+        },
+        "categories": {
+          "$ref": "#/$defs/CategoriesConfig"
+        },
+        "feeds": {
+          "items": {
+            "$ref": "#/$defs/FeedConfig"
+          },
+          "title": "Feeds",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "weight",
+        "feeds"
+      ],
+      "title": "SourceConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/SourceConfig"
+      },
+      "title": "Sources",
+      "type": "array"
+    }
+  },
+  "required": [
+    "sources"
+  ],
+  "title": "SourcesFile",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Regenerated from the Pydantic models in cs_lookup_files.models.config. Runtime validation is authoritative; this schema is for editors/linting."
+}

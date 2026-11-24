@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -9,58 +10,67 @@ from typing import Any
 import polars as pl
 
 from .collectors import fetch
-from .enrichers.asn import AsnTables, enrich_ips, enrich_networks, load_asn_tables
-from .etl.engine import SourceOutput, run_source
+from .enrichers.asn import AsnTables, enrich_frame, load_asn_tables
+from .etl.engine import ALL_COLUMNS, SourceOutput, run_source
 from .exporters.exports import write_csv, write_json
 from .exporters.metadata import write_metadata
-from .models.config import Settings, SourceConfig, SourcesFile
+from .models.config import FeedConfig, Settings, SourceConfig, SourcesFile
 from .models.metadata import RunResult, SourceResult, SourceStatusKind
 from .scoring import score
 from .state import merge_categories_fn, merge_state
 
 logger = logging.getLogger("cs_lookup_files")
 
-FETCHER = Callable[[SourceConfig], str]
+FETCHER = Callable[[SourceConfig, FeedConfig], str]
 
 UTC_DT = pl.Datetime(time_unit="us", time_zone="UTC")
+
+# One dataset per indicator type + the ASN rollup.
+DATASET_TYPES = {
+    "ip": "malicious_ips",
+    "network": "malicious_networks",
+    "domain": "malicious_domains",
+    "url": "malicious_urls",
+    "md5": "malicious_md5",
+    "sha256": "malicious_sha256",
+    "email": "malicious_emails",
+}
+_OUTPUT_COLUMNS = {
+    "ip": "ip_columns",
+    "network": "network_columns",
+    "domain": "domain_columns",
+    "url": "url_columns",
+    "md5": "md5_columns",
+    "sha256": "sha256_columns",
+    "email": "email_columns",
+}
+_SORT_COLUMNS = {
+    "ip": ["ip_version", "ip_key"],
+    "network": ["family", "start_key", "prefix"],
+    "domain": ["domain"],
+    "url": ["url"],
+    "md5": ["md5"],
+    "sha256": ["sha256"],
+    "email": ["email"],
+}
 
 
 class PipelineError(RuntimeError):
     pass
 
 
-_EMPTY_IP_SCHEMA: dict[str, pl.DataType] = {
-    "ip": pl.String(),
-    "ip_int": pl.Int64(),
-    "ip_version": pl.Int8(),
-    "ip_key": pl.String(),
-    "sources": pl.List(pl.String()),
-    "categories": pl.List(pl.String()),
-    "first_seen": UTC_DT,
-    "last_seen": UTC_DT,
-}
-_EMPTY_NET_SCHEMA: dict[str, pl.DataType] = {
-    "network": pl.String(),
-    "family": pl.Int8(),
-    "start_key": pl.String(),
-    "start_int": pl.Int64(),
-    "prefix": pl.Int32(),
-    "sources": pl.List(pl.String()),
-    "categories": pl.List(pl.String()),
-    "first_seen": UTC_DT,
-    "last_seen": UTC_DT,
-}
-_EMPTY_ASN_SCHEMA: dict[str, pl.DataType] = {
-    "asn": pl.Int64(),
-    "asn_name": pl.String(),
-    "country": pl.String(),
-    "confidence_score": pl.Int64(),
-    "malicious_ip_count": pl.Int64(),
-    "source_count": pl.Int64(),
-    "sources": pl.List(pl.String()),
-    "first_seen": UTC_DT,
-    "last_seen": UTC_DT,
-}
+def _ensure_schema(df: pl.DataFrame) -> pl.DataFrame:
+    from .etl.engine import _dtype
+
+    out = df
+    scope = (*ALL_COLUMNS, "first_seen", "confidence_score", "source_count")
+    for col in scope:
+        if col not in out.columns:
+            dtype = _dtype(col) if col in ALL_COLUMNS else (
+                UTC_DT if col == "first_seen" else pl.Int64()
+            )
+            out = out.with_columns(pl.lit(None, dtype=dtype).alias(col))
+    return out
 
 
 class Pipeline:
@@ -97,14 +107,14 @@ class Pipeline:
 
     # ------------------------------------------------------------------ fetch
 
-    def _default_fetch(self, cfg: SourceConfig) -> str:
+    def _default_fetch(self, source: SourceConfig, feed: FeedConfig) -> str:
         if self.offline:
-            return self._offline_fetch(cfg)
-        return fetch.fetch_text(cfg.fetch, cfg.parse)
+            return self._offline_fetch(feed)
+        return fetch.fetch_text(feed.fetch, feed.parse)
 
-    def _offline_fetch(self, cfg: SourceConfig) -> str:
+    def _offline_fetch(self, feed: FeedConfig) -> str:
         base = Path(self.offline_dir) if self.offline_dir else Path("fixtures")
-        path = base / cfg.id
+        path = base / feed.fixture_key()
         try:
             return path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
@@ -118,7 +128,7 @@ class Pipeline:
         if not active:
             raise PipelineError("no source succeeded; nothing to publish")
 
-        ip_df, net_df = self._union_results()
+        df = self._union_results()
         asn_tables = self.asn_tables
         if asn_tables is None:
             asn_tables = load_asn_tables(
@@ -128,25 +138,16 @@ class Pipeline:
                 offline_dir=self.offline_dir,
             )
 
-        state, ip_df, net_df, carried_ips, carried_nets = self._merge_state(ip_df, net_df)
+        state, df, carried = self._merge_state(df)
         self._state = state
+        df = _ensure_schema(df)
 
-        ip_df = self._normalize_ip(ip_df)
-        net_df = self._normalize_net(net_df)
-
-        # Idempotent safety net: never publish private/bogon indicators even if a
-        # source config omits the drop ops.
-        ip_df = self._filter_bogon(ip_df)
-        net_df = self._filter_bogon(net_df)
+        # Idempotent safety net: never publish private/bogon network/ip values.
+        df = self._filter_bogon(df)
 
         if self.dry_run:
-            logger.info(
-                "dry run: %d ips, %d networks after merge (carried ips=%d, nets=%d)",
-                ip_df.height,
-                net_df.height,
-                carried_ips,
-                carried_nets,
-            )
+            counts = df.group_by("type").len().sort("type")
+            logger.info("dry run: collected indicators:\n%s", counts)
             return RunResult(
                 version=self.version,
                 generated_at=self.run_time,
@@ -154,21 +155,22 @@ class Pipeline:
                 output_files=[],
             )
 
-        ip_df = enrich_ips(ip_df, asn_tables)
-        net_df = enrich_networks(net_df, asn_tables)
+        df = enrich_frame(df, asn_tables)
 
         weights = {c.id: c.weight for c in self.sources.sources}
+        ioc_weights = {c.id: dict(c.ioc_weights) for c in self.sources.sources if c.ioc_weights}
         max_scores = self.settings.scoring.max_single_source_score
         scoring = self.settings.scoring
 
-        ip_df = score.score_df(ip_df, weights, scoring, max_scores, self.run_time, "ip")
-        net_df = score.score_df(net_df, weights, scoring, max_scores, self.run_time, "network")
+        df = score.score_df(
+            df, weights, scoring, max_scores, self.run_time, "sort_key",
+            ioc_weights=ioc_weights or None,
+        )
 
-        ip_df = self._prune(ip_df)
-        net_df = self._prune(net_df)
+        df = self._prune(df)
 
-        asn_df = self._aggregate_asns(ip_df, net_df)
-        files = self._export(ip_df, net_df, asn_df, source_results)
+        asn_df = self._aggregate_asns(df)
+        files = self._export(df, asn_df, source_results)
         self._export_state(state)
 
         return RunResult(
@@ -181,94 +183,103 @@ class Pipeline:
     # ------------------------------------------------------------------ steps
 
     def _collect(self) -> list[SourceResult]:
+
+        enabled = [cfg for cfg in self.sources.sources if cfg.enabled]
         results: list[SourceResult] = []
         outputs: list[SourceOutput] = []
-        for cfg in self.sources.sources:
-            if not cfg.enabled:
-                continue
+        max_workers = min(self.settings.max_workers, max(len(enabled), 1))
+
+        def _one(cfg: SourceConfig) -> SourceOutput:
             logger.info("collecting source %s", cfg.id)
-            try:
-                out: SourceOutput = run_source(cfg, self.fetch_impl, self.run_time)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("source %s failed: %s", cfg.id, exc)
-                results.append(SourceResult(source_id=cfg.id, status="failed", records=0, error=str(exc)))
-                continue
-            results.append(
-                SourceResult(
-                    source_id=out.source_id,
-                    status=out.status,
-                    records=out.records,
-                    error=None,
-                )
-            )
-            outputs.append(out)
-            logger.info(
-                "source %s: status=%s records=%d ip_rows=%d net_rows=%d",
-                out.source_id,
-                out.status,
-                out.records,
-                out.ip_df.height,
-                out.network_df.height,
-            )
+            return run_source(cfg, self.fetch_impl, self.run_time)
+
+        if len(enabled) == 1:
+            for cfg in enabled:
+                try:
+                    output = _one(cfg)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("source %s failed: %s", cfg.id, exc)
+                    results.append(SourceResult(source_id=cfg.id, status="failed", records=0, error=str(exc)))
+                    continue
+                results.append(SourceResult(source_id=output.source_id, status=output.status,
+                                            records=output.records, error=None))
+                outputs.append(output)
+                logger.info("source %s: status=%s records=%d rows=%d",
+                            output.source_id, output.status, output.records, output.df.height)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {ex.submit(_one, cfg): cfg for cfg in enabled}
+                done = 0
+                for fut in as_completed(futures):
+                    cfg = futures[fut]
+                    try:
+                        output = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("source %s failed: %s", cfg.id, exc)
+                        results.append(SourceResult(source_id=cfg.id, status="failed", records=0, error=str(exc)))
+                        continue
+                    results.append(SourceResult(source_id=output.source_id, status=output.status,
+                                                records=output.records, error=None))
+                    outputs.append(output)
+                    logger.info("source %s: status=%s rows=%d", output.source_id, output.status, output.df.height)
+                    done += 1
         self._outputs = outputs
         return results
 
-    def _union_results(self) -> tuple[pl.DataFrame, pl.DataFrame]:
-        ip_frames = [o.ip_df for o in self._outputs if not o.ip_df.is_empty()]
-        net_frames = [o.network_df for o in self._outputs if not o.network_df.is_empty()]
-        ip_df = self._dedupe(ip_frames) if ip_frames else pl.DataFrame(schema=_EMPTY_IP_SCHEMA)
-        net_df = self._dedupe(net_frames) if net_frames else pl.DataFrame(schema=_EMPTY_NET_SCHEMA)
-        return ip_df, net_df
+    def _union_results(self) -> pl.DataFrame:
+        frames = [o.df for o in self._outputs if not o.df.is_empty()]
+        if not frames:
+            from .etl.engine import _empty_df
 
-    @staticmethod
-    def _dedupe(frames: list[pl.DataFrame]) -> pl.DataFrame:
+            return _empty_df()
         combined = pl.concat(frames, how="vertical_relaxed")
-        identity = [c for c in combined.columns if c not in ("sources", "categories", "last_seen")]
-        aggs: list[pl.Expr] = [
-            pl.col("last_seen").max().alias("last_seen"),
+        extras = [
+            c
+            for c in combined.columns
+            if c != "type" and c != "value" and c != "sort_key"
+            and c not in ("sources", "categories", "last_seen")
+        ]
+        return combined.group_by(["type", "value"]).agg(
+            pl.col("sort_key").first().alias("sort_key"),
             pl.col("sources").explode().unique().sort().alias("sources"),
             pl.col("categories").explode().unique().sort().alias("categories"),
-        ]
-        return combined.group_by(identity).agg(aggs)
+            pl.col("last_seen").max().alias("last_seen"),
+            *[pl.col(c).first().alias(c) for c in extras],
+        )
 
     def _merge_state(
         self,
-        ip_df: pl.DataFrame,
-        net_df: pl.DataFrame,
-    ) -> tuple[Any, pl.DataFrame, pl.DataFrame, int, int]:
+        df: pl.DataFrame,
+    ) -> tuple[Any, pl.DataFrame, int]:
         from .state import load_state
 
         prev = load_state(self.state_path)
         categories_fn = merge_categories_fn(
             {c.id: list(c.categories.default) for c in self.sources.sources}
         )
-        state, ip_df, net_df, carried_ips, carried_nets = merge_state(
+        state, df, carried = merge_state(
             prev,
-            ip_df,
-            net_df,
+            df,
             self.run_time,
             self.settings.scoring.ttl_days,
             categories_fn,
         )
-        logger.info("state merged; carried ips=%d nets=%d", carried_ips, carried_nets)
-        return state, ip_df, net_df, carried_ips, carried_nets
-
-    def _normalize_ip(self, df: pl.DataFrame) -> pl.DataFrame:
-        return _ensure_schema(df, _EMPTY_IP_SCHEMA)
-
-    def _normalize_net(self, df: pl.DataFrame) -> pl.DataFrame:
-        return _ensure_schema(df, _EMPTY_NET_SCHEMA)
+        logger.info("state merged; carried=%d", carried)
+        return state, df, carried
 
     def _filter_bogon(self, df: pl.DataFrame) -> pl.DataFrame:
         if df.is_empty():
             return df
         from .normalizers import ipaddr
 
-        key = "ip" if "ip" in df.columns else "network"
-        keep: list[bool] = [
-            ipaddr.is_globally_routable(str(v)) if v is not None else False
-            for v in df[key].to_list()
-        ]
+        def keep_row(row: dict[str, Any]) -> bool:
+            t = row.get("type")
+            v = row.get("value")
+            if t in ("ip", "network"):
+                return bool(v) and ipaddr.is_globally_routable(str(v))
+            return True
+
+        keep = [keep_row(row) for row in df.to_dicts()]
         return df.filter(pl.Series("keep", keep))
 
     def _prune(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -280,85 +291,71 @@ class Pipeline:
         stale = (pl.lit(now_ts) - pl.col("last_seen").dt.epoch("s")) / 86400.0 > ttl
         return df.filter(~stale).filter(pl.col("confidence_score") >= min_conf)
 
-    def _aggregate_asns(self, ip_df: pl.DataFrame, net_df: pl.DataFrame) -> pl.DataFrame:
-        """Roll member IP/network rows up into per-ASN rows.
-
-        ``malicious_ip_count`` counts IP members only; ``sources`` is the union
-        of all member sources; ASN confidence reuses the indicator scoring so
-        multi-source ASNs outrank single-source ones.
-        """
-        members_ip = ip_df.select("asn", "sources", "first_seen", "last_seen")
-        members_net = net_df.select("asn", "sources", "first_seen", "last_seen")
-        members = pl.concat([members_ip, members_net], how="vertical_relaxed").filter(
-            pl.col("asn").is_not_null()
-        )
+    def _aggregate_asns(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Roll ip/network rows into per-ASN output rows."""
+        members = df.filter(pl.col("asn").is_not_null())
         if members.is_empty():
-            return pl.DataFrame(schema=_EMPTY_ASN_SCHEMA)
-
+            return pl.DataFrame(
+                schema={
+                    "asn": pl.Int64(), "asn_name": pl.String(), "country": pl.String(),
+                    "confidence_score": pl.Int64(), "malicious_ip_count": pl.Int64(),
+                    "source_count": pl.Int64(), "sources": pl.List(pl.String()),
+                }
+            )
         g = members.group_by("asn").agg(
             pl.col("sources").explode().unique().sort().alias("sources"),
-            pl.col("first_seen").min().alias("first_seen"),
-            pl.col("last_seen").max().alias("last_seen"),
+            pl.col("asn_name").drop_nulls().first().alias("asn_name"),
+            pl.col("country").drop_nulls().first().alias("country"),
         )
-        ip_counts = (
-            ip_df.filter(pl.col("asn").is_not_null())
-            .group_by("asn")
-            .agg(pl.len().alias("malicious_ip_count"))
+        ip_count = (
+            members.filter(pl.col("type") == "ip")
+            .group_by("asn").agg(pl.len().alias("malicious_ip_count"))
         )
-        g = g.join(ip_counts, on="asn", how="left").with_columns(
+        g = g.join(ip_count, on="asn", how="left").with_columns(
             pl.col("malicious_ip_count").fill_null(0).alias("malicious_ip_count")
         )
-
+        # Reuse per-source scoring on the unioned sources of each ASN.
         weights = {c.id: c.weight for c in self.sources.sources}
         max_scores = self.settings.scoring.max_single_source_score
-        g = score.score_df(
-            g,
-            weights,
-            self.settings.scoring,
-            max_scores,
-            self.run_time,
-            "asn",
-        )
-        naming = ip_df.select("asn", "asn_name", "country").drop_nulls()
-        if naming.is_empty():
-            naming = net_df.select("asn", "asn_name", "country").drop_nulls()
-        if not naming.is_empty():
-            naming = naming.group_by("asn").agg(
-                pl.col("asn_name").drop_nulls().first().alias("asn_name"),
-                pl.col("country").drop_nulls().first().alias("country"),
-            )
-            g = g.join(naming, on="asn", how="left")
-        else:
-            g = g.with_columns(
-                pl.lit(None, dtype=pl.String()).alias("asn_name"),
-                pl.lit(None, dtype=pl.String()).alias("country"),
-            )
+        g = score.score_df(g, weights, self.settings.scoring, max_scores, self.run_time, "asn")
         return g
 
     # ------------------------------------------------------------------ output
 
     def _export(
         self,
-        ip_df: pl.DataFrame,
-        net_df: pl.DataFrame,
+        df: pl.DataFrame,
         asn_df: pl.DataFrame,
         source_results: list[SourceResult],
     ) -> list[Path]:
         out = self.output_dir
         out.mkdir(parents=True, exist_ok=True)
-
-        ip_df = ip_df.sort(["ip_version", "ip_key"])
-        net_df = net_df.sort(["family", "start_key", "prefix"])
-        asn_df = asn_df.sort("asn")
+        settings_out = self.settings.output
 
         files: list[Path] = []
-        files.append(self._write_ds(ip_df, "malicious_ips", self.settings.output.ip_columns))
-        files.append(self._write_ds(net_df, "malicious_networks", self.settings.output.network_columns))
-        files.append(self._write_ds(asn_df, "malicious_asns", self.settings.output.asn_columns))
+        counts: dict[str, int] = {}
+        for type_, name in DATASET_TYPES.items():
+            part = df.filter(pl.col("type") == type_)
+            cols = list(getattr(settings_out, _OUTPUT_COLUMNS[type_]))
+            # The unified frame stores the IOC under ``value``; present it under
+            # the dataset's identity column (ip/network/domain/url/md5/sha256/email).
+            alias_col = cols[0]
+            if (
+                alias_col in part.columns
+                and "value" in part.columns
+                and alias_col != "value"
+            ):
+                # Prefer the identity column, e.g. ip/network, when populated.
+                part = part.with_columns(pl.col("value").fill_null(pl.col(alias_col))).drop("value")
+            elif "value" in part.columns:
+                part = part.rename({"value": alias_col})
+            files.append(self._write_ds(part, name, cols, _SORT_COLUMNS[type_]))
+            counts[name] = int(part.height)
+        files.append(self._write_ds(asn_df, "malicious_asns", settings_out.asn_columns, ["asn"]))
+        counts["malicious_asns"] = int(asn_df.height)
 
         meta = out / "metadata.json"
         status: dict[str, SourceStatusKind] = {r.source_id: r.status for r in source_results}
-        counts = {"ips": int(ip_df.height), "networks": int(net_df.height), "asns": int(asn_df.height)}
         write_metadata(
             meta,
             self.version,
@@ -371,25 +368,23 @@ class Pipeline:
         logger.info("exported %d dataset files + metadata", len(files))
         return files
 
-    def _write_ds(self, df: pl.DataFrame, name: str, columns: list[str]) -> Path:
+    def _write_ds(self, df: pl.DataFrame, name: str, columns: list[str], sort_cols: list[str]) -> Path:
         out = self.output_dir
         csv_path = out / f"{name}.csv"
         json_path = out / f"{name}.json"
         wanted = [c for c in columns if c in df.columns]
-        write_csv(df.select(wanted), csv_path, wanted)
-        write_json(df.select(wanted), json_path, wanted)
+        if df.is_empty() or not wanted:
+            arranged = df.select(*columns) if set(columns) <= set(df.columns) else df
+            write_csv(arranged, csv_path, [c for c in columns if c in arranged.columns])
+            write_json(arranged, json_path, [c for c in columns if c in arranged.columns])
+            return csv_path
+        avail_sort = [c for c in sort_cols if c in df.columns]
+        arranged = df.sort(*avail_sort) if avail_sort else df
+        write_csv(arranged.select(wanted), csv_path, wanted)
+        write_json(arranged.select(wanted), json_path, wanted)
         return csv_path
 
     def _export_state(self, state: Any) -> None:
         from .state import dump_state
 
         dump_state(state, self.output_dir / "state.json")
-
-
-def _ensure_schema(df: pl.DataFrame, schema: dict[str, pl.DataType]) -> pl.DataFrame:
-    """Ensure a frame has every column in ``schema`` (null-filled)."""
-    out = df
-    for name, dtype in schema.items():
-        if name not in out.columns:
-            out = out.with_columns(pl.lit(None, dtype=dtype).alias(name))
-    return out.select(list(schema))

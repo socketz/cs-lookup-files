@@ -72,6 +72,16 @@ jobs:
             output/malicious_networks.json
             output/malicious_asns.csv
             output/malicious_asns.json
+            output/malicious_domains.csv
+            output/malicious_domains.json
+            output/malicious_urls.csv
+            output/malicious_urls.json
+            output/malicious_md5.csv
+            output/malicious_md5.json
+            output/malicious_sha256.csv
+            output/malicious_sha256.json
+            output/malicious_emails.csv
+            output/malicious_emails.json
             output/metadata.json
             output/state.json
           retention-days: 30

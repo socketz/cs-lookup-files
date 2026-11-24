@@ -27,8 +27,10 @@ by CrowdStrike Falcon. The following are treated as security-relevant:
 
 ## Security posture
 
-- **Never store secrets in the repository.** API keys are supplied via the
-  workflow `env:` block and referenced as `$VAR` in `config/sources.yaml`.
+- **Never store secrets in the repository.** API keys are supplied via the CI
+  workflow `env:` block, the shell environment, or a local `.env` (python-dotenv,
+  gitignored) and referenced as `$VAR` in `config/sources.yaml`. Keys missing at
+  runtime cause the affected source to be **skipped**, not failed.
 - **Bogon filtering.** A global safety net removes private/reserved/documentation
   ranges even if a source config omits the relevant clean ops.
 - **Output validation.** Each dataset is validated by Pydantic schemas and the

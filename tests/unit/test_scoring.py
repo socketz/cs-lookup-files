@@ -83,3 +83,24 @@ def test_score_always_bounded():
     df = _df([["spamhaus_drop", "abusech_feodo", "firehol", "abuseipdb", "alienvault_otx"]])
     vals = _scores(df)
     assert all(0 <= v <= 100 for v in vals)
+
+
+def test_ioc_weights_override_per_type():
+    """A source can be more (or less) weighted for one IOC type than another."""
+
+    df = _df([["alienvault_otx"]], last_days_ago=[120], first_days_ago=[121]).with_columns(
+        pl.Series("type", ["domain"])
+    )
+    # default: otx weight 70 -> decays low with age
+    default = score.score_df(df, WEIGHTS, ScoringSettings(max_single_source_score=dict(MAX_SCORES)),
+                             dict(MAX_SCORES), RUN_TIME, "k")["confidence_score"].to_list()[0]
+    # override: otx strongly weighted for domain -> higher
+    strong = score.score_df(df, WEIGHTS, ScoringSettings(max_single_source_score=dict(MAX_SCORES)),
+                            dict(MAX_SCORES), RUN_TIME, "k",
+                            ioc_weights={"alienvault_otx": {"domain": 95}})["confidence_score"].to_list()[0]
+    assert strong > default
+    # a weak override lowers it
+    weak = score.score_df(df, WEIGHTS, ScoringSettings(max_single_source_score=dict(MAX_SCORES)),
+                          dict(MAX_SCORES), RUN_TIME, "k",
+                          ioc_weights={"alienvault_otx": {"domain": 30}})["confidence_score"].to_list()[0]
+    assert weak < default

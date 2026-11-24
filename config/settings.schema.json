@@ -1,0 +1,166 @@
+{
+  "$defs": {
+    "AsnSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "ipv4_url": {
+          "default": "https://iptoasn.com/data/ip2asn-v4.tsv.gz",
+          "title": "Ipv4 Url",
+          "type": "string"
+        },
+        "ipv6_url": {
+          "default": "https://iptoasn.com/data/ip2asn-v6.tsv.gz",
+          "title": "Ipv6 Url",
+          "type": "string"
+        },
+        "cache_ttl_hours": {
+          "default": 6,
+          "title": "Cache Ttl Hours",
+          "type": "integer"
+        }
+      },
+      "title": "AsnSettings",
+      "type": "object"
+    },
+    "OutputSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "default": "output",
+          "title": "Dir",
+          "type": "string"
+        },
+        "ip_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ip Columns",
+          "type": "array"
+        },
+        "network_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Network Columns",
+          "type": "array"
+        },
+        "asn_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Asn Columns",
+          "type": "array"
+        },
+        "domain_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Domain Columns",
+          "type": "array"
+        },
+        "md5_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Md5 Columns",
+          "type": "array"
+        },
+        "sha256_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sha256 Columns",
+          "type": "array"
+        },
+        "url_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Url Columns",
+          "type": "array"
+        },
+        "email_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Email Columns",
+          "type": "array"
+        }
+      },
+      "title": "OutputSettings",
+      "type": "object"
+    },
+    "ScoringSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "half_life_days": {
+          "default": 30.0,
+          "title": "Half Life Days",
+          "type": "number"
+        },
+        "ttl_days": {
+          "default": 90,
+          "title": "Ttl Days",
+          "type": "integer"
+        },
+        "persistence_bonus_max": {
+          "default": 5.0,
+          "title": "Persistence Bonus Max",
+          "type": "number"
+        },
+        "persistence_half_life_days": {
+          "default": 60.0,
+          "title": "Persistence Half Life Days",
+          "type": "number"
+        },
+        "default_single_source_score": {
+          "default": 70,
+          "title": "Default Single Source Score",
+          "type": "integer"
+        },
+        "max_single_source_score": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Max Single Source Score",
+          "type": "object"
+        },
+        "source_count_caps": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Source Count Caps",
+          "type": "object"
+        },
+        "min_confidence": {
+          "default": 0,
+          "title": "Min Confidence",
+          "type": "integer"
+        }
+      },
+      "title": "ScoringSettings",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Regenerated from the Pydantic models in cs_lookup_files.models.config. Runtime validation is authoritative; this schema is for editors/linting.",
+  "properties": {
+    "scoring": {
+      "$ref": "#/$defs/ScoringSettings"
+    },
+    "asn": {
+      "$ref": "#/$defs/AsnSettings"
+    },
+    "output": {
+      "$ref": "#/$defs/OutputSettings"
+    },
+    "max_workers": {
+      "default": 6,
+      "title": "Max Workers",
+      "type": "integer"
+    }
+  },
+  "title": "Settings",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

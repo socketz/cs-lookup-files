@@ -20,6 +20,24 @@ Configured in `config/sources.yaml` (`weight`). Baselines:
 
 An unknown source id (e.g. future config drift) defaults to weight **50**.
 
+### Per-IOC-type weight (`ioc_weights`)
+
+Not every source is equally reliable for every indicator type a C2 tracker is
+more trustworthy on `ip` than on `domain`; a phishing feed is stronger on
+`url`/`domain`. Set an optional per-type override:
+
+```yaml
+- id: c2_intelfeeds
+  weight: 75            # global fallback
+  ioc_weights:
+    ip: 85              # stronger on IPs
+    domain: 50          # weaker on domains
+```
+
+For a given row, the effective weight is
+`ioc_weights[source].get(type, weight)`. This keeps the global table stable
+while letting each feed express type-specific reliability without core changes.
+
 ### Probability model
 
 Each source ``i`` is treated as an independent confirmation with probability
@@ -89,4 +107,6 @@ score = min(score, band_cap)
 
 All thresholds live in `config/settings.yaml` under `scoring:`. Adjust
 `half_life_days`, `ttl_days`, `persistence_*`, `max_single_source_score`,
-`source_count_caps` and `min_confidence` without touching code.
+`source_count_caps` and `min_confidence` without touching code. Per-source
+reliability (`weight`) and per-type relevance (`ioc_weights`) are set in each
+entry of `config/sources.yaml`.

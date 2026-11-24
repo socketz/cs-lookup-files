@@ -2,18 +2,64 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+from urllib.parse import urlparse
 
 import httpx
+from dotenv import load_dotenv
 
 from ..models.config import FetchConfig, ParseConfig
 from ..normalizers.parsers import _walk_path
 
+# Load the local .env file into the environment (if it exists) so `$VAR`
+# references in config resolve from it exactly as from real env vars. Existing
+# environment variables take precedence over .env values.
+load_dotenv()
+
 USER_AGENT = "cs-lookup-files/0.1 (+https://github.com/socketz/cs-lookup-files)"
+
+
+class _RateLimiter:
+    """Per-host token bucket so parallel source fetches stay polite."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # host -> (next_available_epoch, interval_seconds)
+        self._last: dict[str, float] = {}
+
+    def wait(self, host: str, requests_per_minute: int | None) -> None:
+        if not requests_per_minute or requests_per_minute <= 0:
+            return
+        interval = 60.0 / requests_per_minute
+        with self._lock:
+            now = time.monotonic()
+            next_ok = max(self._last.get(host, 0.0), now) + interval
+            delay = next_ok - now
+            if delay > 0:
+                time.sleep(delay)
+            self._last[host] = next_ok
+
+
+_RATE = _RateLimiter()
 
 
 class FetchError(RuntimeError):
     """Raised when a source cannot be fetched (network, auth env, HTTP status)."""
+
+
+class MissingSecret(FetchError):
+    """Raised when a source requires an API key that is not configured.
+
+    The pipeline treats this as a *skip* rather than a failure: the source is
+    not downloaded and its status is ``skipped`` until the key is provided in
+    the environment or ``.env``.
+    """
+
+    def __init__(self, var: str, context: str):
+        super().__init__(f"source {context}: required env var {var} is not set (skipping)")
+        self.var = var
+        self.context = context
 
 
 class PartialFetchError(FetchError):
@@ -33,11 +79,15 @@ class PartialFetchError(FetchError):
 def resolve_env_ref(value: str) -> str | None:
     """Resolve ``$VAR`` header/param values from the runtime environment.
 
-    Keys are passed via the workflow ``env:`` block and never live in the
-    repository. A plain value is returned unchanged.
+    Keys are provided via the workflow ``env:`` block, exported in the shell,
+    or the local ``.env`` (loaded by python-dotenv). An absent or empty value
+    (e.g. a blank ``KEY=`` in ``.env``) resolves to ``None`` so the caller can
+    treat the source as *skipped*, not failed. A plain value is returned
+    unchanged.
     """
-    if value.startswith("$"):
-        return os.environ.get(value[1:])
+    if value.startswith("$") and len(value) > 1 and not (value.startswith("$$")):
+        resolved = os.environ.get(value[1:])
+        return resolved if resolved and resolved.strip() else None
     return value
 
 
@@ -46,7 +96,7 @@ def _finalize_headers(fetch: FetchConfig) -> dict[str, str]:
     for name, value in fetch.headers.items():
         resolved = resolve_env_ref(value)
         if resolved is None:
-            raise FetchError(f"required env var {value[1:]} is not set")
+            raise MissingSecret(value[1:], fetch.url)
         headers[name] = resolved
     if "user-agent" not in {k.lower() for k in headers}:
         headers["User-Agent"] = USER_AGENT
@@ -58,7 +108,7 @@ def _finalize_params(fetch: FetchConfig, page: int | None = None) -> dict[str, s
     for name, value in fetch.params.items():
         resolved = resolve_env_ref(str(value))
         if resolved is None:
-            raise FetchError(f"required env var {value} is not set")
+            raise MissingSecret(str(value).lstrip("$"), fetch.url)
         params[name] = resolved
     if page is not None and fetch.pagination is not None:
         params[fetch.pagination.param] = str(page)
@@ -93,7 +143,11 @@ def fetch_text(fetch: FetchConfig, parse_cfg: ParseConfig | None = None) -> str:
         if pagination is None:
             pages.append(_get_once(client, fetch, page=None))
             return "\n".join(pages)
+        started = time.monotonic()
         for page in range(1, pagination.max_pages + 1):
+            if pagination.max_seconds is not None and (time.monotonic() - started) >= pagination.max_seconds:
+                # Wall-clock budget exhausted: keep what we have and stop cleanly.
+                return "\n".join(pages)
             try:
                 body = _get_once(client, fetch, page=page)
             except FetchError as exc:
@@ -115,9 +169,11 @@ def fetch_text(fetch: FetchConfig, parse_cfg: ParseConfig | None = None) -> str:
 
 
 def _get_once(client: httpx.Client, fetch: FetchConfig, page: int | None) -> str:
+    host = urlparse(fetch.url).netloc
     last: Exception | None = None
     for attempt in range(fetch.retries + 1):
         try:
+            _RATE.wait(host, fetch.requests_per_minute)
             response = client.get(
                 fetch.url,
                 params=_finalize_params(fetch, page),

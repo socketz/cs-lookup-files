@@ -205,6 +205,7 @@ def enrich_ips(ip_df: pl.DataFrame, tables: AsnTables) -> pl.DataFrame:
     """Attach asn/asn_name/country to an IP frame keyed on ``ip_version``/``ip_int``."""
     if ip_df.is_empty():
         return _with_asn_columns(ip_df)
+    ip_df = _drop_asn_cols(ip_df)
 
     is_v4 = pl.col("ip_version") == 4
     v4_df = ip_df.filter(is_v4)
@@ -222,6 +223,7 @@ def enrich_networks(net_df: pl.DataFrame, tables: AsnTables) -> pl.DataFrame:
     or ``family``/``start_key`` (v6). All existing columns are preserved."""
     if net_df.is_empty():
         return _with_asn_columns(net_df)
+    net_df = _drop_asn_cols(net_df)
 
     is_v4 = pl.col("family") == 4
     v4_df = net_df.filter(is_v4)
@@ -232,3 +234,54 @@ def enrich_networks(net_df: pl.DataFrame, tables: AsnTables) -> pl.DataFrame:
     v6_df = _enrich_v6(v6_df, "start_key", _V6Index(tables.v6)) if not v6_df.is_empty() else _with_asn_columns(v6_df)
 
     return pl.concat([v4_df, v6_df], how="vertical_relaxed")
+
+
+def _drop_asn_cols(df: pl.DataFrame) -> pl.DataFrame:
+    to_drop = [c for c in ("asn", "asn_name", "country") if c in df.columns]
+    return df.drop(to_drop) if to_drop else df
+
+
+def enrich_frame(df: pl.DataFrame, tables: AsnTables) -> pl.DataFrame:
+    """Enrich ASN data for the ip/network rows of a unified indicator frame.
+
+    Non-IP/network rows get null ASN columns. Each type partition is enriched
+    independently and re-concatenated after normalizing to a common schema.
+    """
+    if df.is_empty():
+        return _with_asn_columns(df)
+
+    ip_rows = df.filter(pl.col("type") == "ip")
+    net_rows = df.filter(pl.col("type") == "network")
+    other_rows = df.filter(~pl.col("type").is_in(["ip", "network"]))
+
+    parts: list[pl.DataFrame] = []
+    enriched_ips = enrich_ips(ip_rows, tables) if not ip_rows.is_empty() else _with_asn_columns(ip_rows)
+    if not net_rows.is_empty():
+        enriched_nets: pl.DataFrame = enrich_networks(net_rows, tables)
+    else:
+        enriched_nets = _with_asn_columns(net_rows)
+    parts.append(enriched_ips)
+    parts.append(enriched_nets)
+    if not other_rows.is_empty():
+        parts.append(_with_asn_columns(other_rows))
+
+    # Unify to empty-frame schema so column order/names match across parts.
+    empty = _empty_unified_schema()
+    normalized = [_standardize(p, empty) for p in parts]
+    return pl.concat(normalized, how="vertical_relaxed")
+
+
+def _empty_unified_schema() -> pl.DataFrame:
+    from ..etl.engine import ALL_COLUMNS, _dtype
+
+    schema = {c: _dtype(c) for c in (*ALL_COLUMNS, "asn", "asn_name", "country")}
+    schema["first_seen"] = pl.Datetime(time_unit="us", time_zone="UTC")
+    return pl.DataFrame(schema=schema)
+
+
+def _standardize(df: pl.DataFrame, template: pl.DataFrame) -> pl.DataFrame:
+    out = df
+    for col in template.columns:
+        if col not in out.columns:
+            out = out.with_columns(pl.lit(None, dtype=template.schema[col]).alias(col))
+    return out.select(template.columns)
