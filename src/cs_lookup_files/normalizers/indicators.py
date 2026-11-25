@@ -9,9 +9,13 @@ from urllib.parse import urlsplit
 
 from . import ipaddr
 
-IndicatorType = Literal["ip", "network", "domain", "url", "md5", "sha256", "email"]
+IndicatorType = Literal["ip", "network", "domain", "url", "md5", "sha256", "email", "asn"]
 
-INDICATOR_TYPES: tuple[IndicatorType, ...] = ("ip", "network", "domain", "url", "md5", "sha256", "email")
+INDICATOR_TYPES: tuple[IndicatorType, ...] = (
+    "ip", "network", "domain", "url", "md5", "sha256", "email", "asn",
+)
+
+_MAX_ASN = 4294967295
 
 # Common, conservative domain pattern. We do not validate DNS existence, just
 # reject obvious junk / non-domain values.
@@ -70,6 +74,22 @@ def canonical_url(value: str) -> str | None:
     return f"{scheme}://{host}{port}{path}{query}"
 
 
+def canonical_asn(value: str) -> str | None:
+    """Canonicalize an ASN (``AS12345`` or ``12345``) to bare digits.
+
+    Returns ``None`` for out-of-range, non-numeric or otherwise invalid input.
+    """
+    v = value.strip()
+    if v[:2].upper() == "AS":
+        v = v[2:].strip()
+    if not v.isdigit():
+        return None
+    number = int(v)
+    if not 1 <= number <= _MAX_ASN:
+        return None
+    return str(number)
+
+
 def canonical_indicator(kind: IndicatorType, value: str) -> str | None:
     """Return the canonical string for an indicator of ``kind`` or None."""
     if kind == "domain":
@@ -80,6 +100,8 @@ def canonical_indicator(kind: IndicatorType, value: str) -> str | None:
         return canonical_email(value)
     if kind == "url":
         return canonical_url(value)
+    if kind == "asn":
+        return canonical_asn(value)
     if kind == "ip":
         if "/" in value:
             return None
@@ -98,7 +120,7 @@ def canonical_indicator(kind: IndicatorType, value: str) -> str | None:
 
 
 def sort_key(kind: IndicatorType, value: str) -> str:
-    """Deterministic ordering key; IP/network use version-aware numeric keys."""
+    """Deterministic ordering key; IP/network/ASN use numeric keys."""
     if kind == "ip":
         try:
             return f"{ipaddr.ip_version(value)}:{ipaddr.ip_sort_key(value)}"
@@ -107,8 +129,16 @@ def sort_key(kind: IndicatorType, value: str) -> str:
     if kind == "network":
         v, start, prefix = ipaddr.network_sort_key(value)
         return f"{v}:{start}:{prefix:02d}"
+    if kind == "asn":
+        try:
+            return f"{int(value):010d}"
+        except ValueError:
+            return value
     return value
 
 
 def asn_relevant(kind: IndicatorType) -> bool:
+    # ASN indicators are authoritative rows themselves; they are never derived
+    # from ip2asn enrichment (that would turn an entire ASN malicious from a
+    # single flagged IP).
     return kind in ("ip", "network")

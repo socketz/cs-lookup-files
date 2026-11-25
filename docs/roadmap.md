@@ -13,8 +13,9 @@ Rollout is phased to keep review simple and avoid rate-limit/format surprises.
 
 - [x] Config-driven source framework (`sources.yaml` parsing model) + JSON Schema.
 - [x] Multi-IOC pipeline: ip/network/asn/domain/url/md5/sha256/email.
-- [x] Sources: FireHOL level1 + per-category sets, Spamhaus DROP, Abuse.ch
-      Feodo, AbuseIPDB blacklist, AlienVault OTX (multi-type), DShield intelfeed.
+- [x] Sources: FireHOL level1 + per-category sets, Spamhaus DROP and ASN-DROP,
+      Abuse.ch Feodo, AbuseIPDB blacklist, AlienVault OTX (multi-type), DShield
+      intelfeed.
 - [x] Confident scoring with global + per-IOC-type (`ioc_weights`) weights,
       banded caps and decay.
 - [x] State persistence (`state.json`), CSV + JSON + `metadata.json` export.
@@ -22,6 +23,23 @@ Rollout is phased to keep review simple and avoid rate-limit/format surprises.
 - [x] Concurrent, rate-limited downloads; `.env` secrets (skipped when absent).
 - [x] GitHub Actions build + release (every 6h), Docker image.
 - [x] Docs: architecture, scoring, sources, CrowdStrike integration.
+
+### Precision changes (anti-false-positive)
+
+- `malicious_asns` is now **only** the authoritative Spamhaus ASN-DROP list
+  (JSONL). The previous ASN rollup (flagged IP -> whole ASN malicious) was
+  removed because a single IP marked thousands of unrelated addresses.
+  `asn`/`asn_name`/`country` on IP/network rows remain context only.
+- Export uses `min_confidence: 75`; single non-authoritative sources (cap 70)
+  and OTX-only rows (cap 55) are not published. `md5`/`sha256`/`email` therefore
+  appear only when corroborated by a second source.
+- Empty datasets are omitted (not written as empty lookups) and reported in
+  `metadata.json` (`ioc_counts` = 0, `empty_datasets`).
+- Per-feed statuses and reasons are recorded in `metadata.source_feeds`; an
+  empty feed no longer marks a whole origin `partial`.
+
+The focus remains **threat hunting**: read-only lookup context, never IOC
+mutation. Precision decisions above reduce noise in hunting joins.
 
 ## Expansion plan (phased)
 

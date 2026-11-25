@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import polars as pl
 
@@ -15,7 +16,7 @@ from .etl.engine import ALL_COLUMNS, SourceOutput, run_source
 from .exporters.exports import write_csv, write_json
 from .exporters.metadata import write_metadata
 from .models.config import FeedConfig, Settings, SourceConfig, SourcesFile
-from .models.metadata import RunResult, SourceResult, SourceStatusKind
+from .models.metadata import FeedStatus, RunResult, SourceResult, SourceStatusKind
 from .scoring import score
 from .state import merge_categories_fn, merge_state
 
@@ -25,10 +26,12 @@ FETCHER = Callable[[SourceConfig, FeedConfig], str]
 
 UTC_DT = pl.Datetime(time_unit="us", time_zone="UTC")
 
-# One dataset per indicator type + the ASN rollup.
+# One dataset per indicator type. ``asn`` is a first-class type fed only by
+# authoritative ASN lists (Spamhaus ASN-DROP); it is never derived from IPs.
 DATASET_TYPES = {
     "ip": "malicious_ips",
     "network": "malicious_networks",
+    "asn": "malicious_asns",
     "domain": "malicious_domains",
     "url": "malicious_urls",
     "md5": "malicious_md5",
@@ -38,6 +41,7 @@ DATASET_TYPES = {
 _OUTPUT_COLUMNS = {
     "ip": "ip_columns",
     "network": "network_columns",
+    "asn": "asn_columns",
     "domain": "domain_columns",
     "url": "url_columns",
     "md5": "md5_columns",
@@ -47,12 +51,16 @@ _OUTPUT_COLUMNS = {
 _SORT_COLUMNS = {
     "ip": ["ip_version", "ip_key"],
     "network": ["family", "start_key", "prefix"],
+    "asn": ["sort_key"],
     "domain": ["domain"],
     "url": ["url"],
     "md5": ["md5"],
     "sha256": ["sha256"],
     "email": ["email"],
 }
+
+# Datasets populated primarily by OTX; used to explain an empty export.
+_OTX_PRIMARY = {"malicious_md5", "malicious_sha256", "malicious_emails"}
 
 
 class PipelineError(RuntimeError):
@@ -110,7 +118,7 @@ class Pipeline:
     def _default_fetch(self, source: SourceConfig, feed: FeedConfig) -> str:
         if self.offline:
             return self._offline_fetch(feed)
-        return fetch.fetch_text(feed.fetch, feed.parse)
+        return fetch.fetch_text(feed.fetch, feed.parse, cache_dir=self.cache_dir)
 
     def _offline_fetch(self, feed: FeedConfig) -> str:
         base = Path(self.offline_dir) if self.offline_dir else Path("fixtures")
@@ -138,12 +146,19 @@ class Pipeline:
                 offline_dir=self.offline_dir,
             )
 
+        allowlist: set[str] = set()
+        for output in self._outputs:
+            allowlist.update(output.allowlist)
+
         state, df, carried = self._merge_state(df)
+        if allowlist:
+            state = self._filter_state_allowlist(state, allowlist)
         self._state = state
         df = _ensure_schema(df)
 
-        # Idempotent safety net: never publish private/bogon network/ip values.
-        df = self._filter_bogon(df)
+        # Idempotent safety net: never publish private/bogon network/ip values,
+        # and discard indicators covered by an allowlist feed.
+        df = self._filter_rows(df, allowlist)
 
         if self.dry_run:
             counts = df.group_by("type").len().sort("type")
@@ -169,8 +184,7 @@ class Pipeline:
 
         df = self._prune(df)
 
-        asn_df = self._aggregate_asns(df)
-        files = self._export(df, asn_df, source_results)
+        files, empty_datasets = self._export(df, source_results)
         self._export_state(state)
 
         return RunResult(
@@ -178,6 +192,7 @@ class Pipeline:
             generated_at=self.run_time,
             source_results=source_results,
             output_files=[f.name for f in files],
+            empty_datasets=empty_datasets,
         )
 
     # ------------------------------------------------------------------ steps
@@ -193,6 +208,11 @@ class Pipeline:
             logger.info("collecting source %s", cfg.id)
             return run_source(cfg, self.fetch_impl, self.run_time)
 
+        def _record(output: SourceOutput) -> None:
+            results.append(SourceResult(source_id=output.source_id, status=output.status,
+                                        records=output.records, error=None))
+            outputs.append(output)
+
         if len(enabled) == 1:
             for cfg in enabled:
                 try:
@@ -201,15 +221,10 @@ class Pipeline:
                     logger.warning("source %s failed: %s", cfg.id, exc)
                     results.append(SourceResult(source_id=cfg.id, status="failed", records=0, error=str(exc)))
                     continue
-                results.append(SourceResult(source_id=output.source_id, status=output.status,
-                                            records=output.records, error=None))
-                outputs.append(output)
-                logger.info("source %s: status=%s records=%d rows=%d",
-                            output.source_id, output.status, output.records, output.df.height)
+                _record(output)
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futures = {ex.submit(_one, cfg): cfg for cfg in enabled}
-                done = 0
                 for fut in as_completed(futures):
                     cfg = futures[fut]
                     try:
@@ -218,11 +233,7 @@ class Pipeline:
                         logger.warning("source %s failed: %s", cfg.id, exc)
                         results.append(SourceResult(source_id=cfg.id, status="failed", records=0, error=str(exc)))
                         continue
-                    results.append(SourceResult(source_id=output.source_id, status=output.status,
-                                                records=output.records, error=None))
-                    outputs.append(output)
-                    logger.info("source %s: status=%s rows=%d", output.source_id, output.status, output.df.height)
-                    done += 1
+                    _record(output)
         self._outputs = outputs
         return results
 
@@ -267,7 +278,31 @@ class Pipeline:
         logger.info("state merged; carried=%d", carried)
         return state, df, carried
 
-    def _filter_bogon(self, df: pl.DataFrame) -> pl.DataFrame:
+    @staticmethod
+    def _allowlist_host(value: str, ioc_type: str) -> str | None:
+        if ioc_type == "domain":
+            return value.strip().lower().rstrip(".")
+        if ioc_type == "url":
+            try:
+                host = urlsplit(value).hostname
+            except ValueError:
+                return None
+            return host.strip().lower().rstrip(".") if host else None
+        return None
+
+    @classmethod
+    def _is_allowlisted(cls, value: str, ioc_type: str, allowlist: set[str]) -> bool:
+        host = cls._allowlist_host(value, ioc_type)
+        if not host:
+            return False
+        if host in allowlist:
+            return True
+        # The top1M list is usually registrable/apex names; tolerate a leading
+        # "www." so "www.example.com" matches "example.com" without suppressing
+        # arbitrary subdomains (e.g. user content on blogspot.com).
+        return host.startswith("www.") and host[4:] in allowlist
+
+    def _filter_rows(self, df: pl.DataFrame, allowlist: set[str]) -> pl.DataFrame:
         if df.is_empty():
             return df
         from .normalizers import ipaddr
@@ -275,72 +310,83 @@ class Pipeline:
         def keep_row(row: dict[str, Any]) -> bool:
             t = row.get("type")
             v = row.get("value")
-            if t in ("ip", "network"):
-                return bool(v) and ipaddr.is_globally_routable(str(v))
-            return True
+            if t in ("ip", "network") and (not v or not ipaddr.is_globally_routable(str(v))):
+                return False
+            return not (allowlist and self._is_allowlisted(str(v), str(t), allowlist))
 
         keep = [keep_row(row) for row in df.to_dicts()]
         return df.filter(pl.Series("keep", keep))
 
+    def _filter_state_allowlist(self, state: Any, allowlist: set[str]) -> Any:
+        if not allowlist or not state.indicators:
+            return state
+        kept = {
+            key: entry
+            for key, entry in state.indicators.items()
+            if not self._is_allowlisted(entry.value, entry.type, allowlist)
+        }
+        return state.model_copy(update={"indicators": kept})
+
     def _prune(self, df: pl.DataFrame) -> pl.DataFrame:
         if df.is_empty():
             return df
-        ttl = self.settings.scoring.ttl_days
-        min_conf = self.settings.scoring.min_confidence
+        scoring = self.settings.scoring
+        ttl = scoring.ttl_days
         now_ts = int(self.run_time.timestamp())
         stale = (pl.lit(now_ts) - pl.col("last_seen").dt.epoch("s")) / 86400.0 > ttl
-        return df.filter(~stale).filter(pl.col("confidence_score") >= min_conf)
-
-    def _aggregate_asns(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Roll ip/network rows into per-ASN output rows."""
-        members = df.filter(pl.col("asn").is_not_null())
-        if members.is_empty():
-            return pl.DataFrame(
-                schema={
-                    "asn": pl.Int64(), "asn_name": pl.String(), "country": pl.String(),
-                    "confidence_score": pl.Int64(), "malicious_ip_count": pl.Int64(),
-                    "source_count": pl.Int64(), "sources": pl.List(pl.String()),
-                }
-            )
-        g = members.group_by("asn").agg(
-            pl.col("sources").explode().unique().sort().alias("sources"),
-            pl.col("asn_name").drop_nulls().first().alias("asn_name"),
-            pl.col("country").drop_nulls().first().alias("country"),
-        )
-        ip_count = (
-            members.filter(pl.col("type") == "ip")
-            .group_by("asn").agg(pl.len().alias("malicious_ip_count"))
-        )
-        g = g.join(ip_count, on="asn", how="left").with_columns(
-            pl.col("malicious_ip_count").fill_null(0).alias("malicious_ip_count")
-        )
-        # Reuse per-source scoring on the unioned sources of each ASN.
-        weights = {c.id: c.weight for c in self.sources.sources}
-        max_scores = self.settings.scoring.max_single_source_score
-        g = score.score_df(g, weights, self.settings.scoring, max_scores, self.run_time, "asn")
-        return g
+        # Per-type floors override the global precision floor for listed types.
+        floor = pl.lit(scoring.min_confidence)
+        for ioc_type, value in scoring.min_confidence_by_type.items():
+            floor = pl.when(pl.col("type") == ioc_type).then(pl.lit(value)).otherwise(floor)
+        return df.filter(~stale).filter(pl.col("confidence_score") >= floor)
 
     # ------------------------------------------------------------------ output
+
+    def _source_feeds(self) -> dict[str, list[FeedStatus]]:
+        # Engine already emits ``FeedStatus`` per feed; no field-by-field copy.
+        return {output.source_id: list(output.feeds) for output in self._outputs}
+
+    def _floor_for(self, type_: str) -> int:
+        scoring = self.settings.scoring
+        return scoring.min_confidence_by_type.get(type_, scoring.min_confidence)
+
+    def _empty_reason(self, type_: str, name: str, status: dict[str, SourceStatusKind]) -> str:
+        floor = self._floor_for(type_)
+        if name in _OTX_PRIMARY:
+            otx = status.get("alienvault_otx")
+            if otx is not None and otx != "ok":
+                return f"alienvault_otx {otx}"
+            return f"no OTX-corroborated rows at or above min_confidence={floor}"
+        return f"no rows at or above min_confidence={floor}"
 
     def _export(
         self,
         df: pl.DataFrame,
-        asn_df: pl.DataFrame,
         source_results: list[SourceResult],
-    ) -> list[Path]:
+    ) -> tuple[list[Path], list[str]]:
         out = self.output_dir
         out.mkdir(parents=True, exist_ok=True)
         settings_out = self.settings.output
 
         files: list[Path] = []
         counts: dict[str, int] = {}
+        empty_datasets: list[str] = []
+        status: dict[str, SourceStatusKind] = {r.source_id: r.status for r in source_results}
+
         for type_, name in DATASET_TYPES.items():
             part = df.filter(pl.col("type") == type_)
             cols = list(getattr(settings_out, _OUTPUT_COLUMNS[type_]))
-            # The unified frame stores the IOC under ``value``; present it under
-            # the dataset's identity column (ip/network/domain/url/md5/sha256/email).
             alias_col = cols[0]
-            if (
+            if type_ == "asn":
+                # Authoritative ASN rows carry the ASN as Int64 in ``asn`` so
+                # JSON stays numeric; ``value`` is only a string fallback.
+                if "asn" in part.columns and "value" in part.columns:
+                    part = part.with_columns(
+                        pl.col("asn").fill_null(pl.col("value").cast(pl.Int64, strict=False))
+                    ).drop("value")
+                elif "value" in part.columns:
+                    part = part.rename({"value": "asn"})
+            elif (
                 alias_col in part.columns
                 and "value" in part.columns
                 and alias_col != "value"
@@ -349,13 +395,15 @@ class Pipeline:
                 part = part.with_columns(pl.col("value").fill_null(pl.col(alias_col))).drop("value")
             elif "value" in part.columns:
                 part = part.rename({"value": alias_col})
-            files.append(self._write_ds(part, name, cols, _SORT_COLUMNS[type_]))
+            written = self._write_ds(part, name, cols, _SORT_COLUMNS[type_])
             counts[name] = int(part.height)
-        files.append(self._write_ds(asn_df, "malicious_asns", settings_out.asn_columns, ["asn"]))
-        counts["malicious_asns"] = int(asn_df.height)
+            if written is None:
+                empty_datasets.append(name)
+                logger.warning("dataset %s empty: %s", name, self._empty_reason(type_, name, status))
+            else:
+                files.append(written)
 
         meta = out / "metadata.json"
-        status: dict[str, SourceStatusKind] = {r.source_id: r.status for r in source_results}
         write_metadata(
             meta,
             self.version,
@@ -363,25 +411,38 @@ class Pipeline:
             [r.source_id for r in source_results],
             status,
             counts,
+            source_feeds=self._source_feeds(),
+            empty_datasets=empty_datasets,
         )
         files.append(meta)
-        logger.info("exported %d dataset files + metadata", len(files))
-        return files
+        total = sum(counts.values())
+        logger.info(
+            "run version=%s datasets=%d non_empty=%d indicators=%d",
+            self.version,
+            len(counts),
+            len(counts) - len(empty_datasets),
+            total,
+        )
+        return files, empty_datasets
 
-    def _write_ds(self, df: pl.DataFrame, name: str, columns: list[str], sort_cols: list[str]) -> Path:
+    def _write_ds(self, df: pl.DataFrame, name: str, columns: list[str], sort_cols: list[str]) -> Path | None:
+        """Write CSV+JSON for one dataset; return None (and remove stale files) when empty."""
         out = self.output_dir
         csv_path = out / f"{name}.csv"
         json_path = out / f"{name}.json"
+        if df.is_empty():
+            for stale in (csv_path, json_path):
+                if stale.exists():
+                    stale.unlink()
+            return None
         wanted = [c for c in columns if c in df.columns]
-        if df.is_empty() or not wanted:
-            arranged = df.select(*columns) if set(columns) <= set(df.columns) else df
-            write_csv(arranged, csv_path, [c for c in columns if c in arranged.columns])
-            write_json(arranged, json_path, [c for c in columns if c in arranged.columns])
-            return csv_path
+        if not wanted:
+            return None
         avail_sort = [c for c in sort_cols if c in df.columns]
         arranged = df.sort(*avail_sort) if avail_sort else df
         write_csv(arranged.select(wanted), csv_path, wanted)
         write_json(arranged.select(wanted), json_path, wanted)
+        logger.info("dataset %s rows=%d", name, df.height)
         return csv_path
 
     def _export_state(self, state: Any) -> None:

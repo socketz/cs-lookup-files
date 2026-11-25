@@ -98,6 +98,25 @@ def _parse_json(text: str, cfg: ParseConfig) -> Iterator[RawRow]:
     yield from (record for record in records if isinstance(record, dict))
 
 
+def _parse_jsonl(text: str, cfg: ParseConfig) -> Iterator[RawRow]:
+    """Parse newline-delimited JSON: one object per non-empty line.
+
+    Blank lines and non-object/malformed lines are skipped. Feeds such as
+    Spamhaus ASN-DROP append a trailing ``{"type": "metadata", ...}`` line;
+    callers drop it naturally because it lacks the mapped indicator field.
+    """
+    for line in io.StringIO(text).readlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            yield payload
+
+
 def _parse_csv(text: str, cfg: ParseConfig) -> Iterator[RawRow]:
     delimiter = cfg.delimiter if cfg.delimiter is not None else ","
     yield from _parse_delimited(text, cfg, delimiter)
@@ -117,6 +136,7 @@ _PARSERS: dict[str, ParserFn] = {
     "csv": _parse_csv,
     "tsv": _parse_tsv,
     "json": _parse_json,
+    "jsonl": _parse_jsonl,
 }
 
 

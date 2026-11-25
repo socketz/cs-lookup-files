@@ -76,12 +76,17 @@ class FetchConfig(BaseModel):
     retries: int = 3
     # Optional polite rate limiting: max requests per minute to this host.
     requests_per_minute: int | None = None
+    # Optional on-disk body cache for expensive/rate-limited APIs (AbuseIPDB).
+    # Freshness is decided by the ``fetched_at`` embedded in the cached file.
+    cache_ttl_hours: float | None = Field(default=None, ge=0)
+    # Optional hard daily request budget persisted across runs (free tiers).
+    max_requests_per_day: int | None = Field(default=None, ge=0)
 
 
 class ParseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    format: Literal["plain_lines", "ipset", "cidr_lines", "csv", "tsv", "json"]
+    format: Literal["plain_lines", "ipset", "cidr_lines", "csv", "tsv", "json", "jsonl"]
     comment_prefix: str | None = None
     has_header: bool = False
     delimiter: str | None = None
@@ -123,6 +128,12 @@ class FeedConfig(BaseModel):
 
     A *source* (e.g. ``firehol``) groups several feeds (URLs); each feed declares
     the IOC types it yields and its own parser/field mapping/clean ops.
+
+    ``role`` separates threat-intel feeds from allowlist feeds. An allowlist
+    feed is parsed but never scored or exported: its domains are used to
+    suppress matching indicators from the consolidated datasets. This is how
+    legitimate-but-compromised sites (e.g. alphaMountain top1M) are discarded
+    rather than down-weighted.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -130,9 +141,12 @@ class FeedConfig(BaseModel):
     # Optional stable id used for offline fixtures and logging; defaults to the
     # URL basename when omitted.
     id: str | None = Field(default=None, pattern=r"^[a-z0-9_]+$", max_length=64)
+    # ``intel`` feeds produce datasets; ``allowlist`` feeds only build a
+    # suppression set (domains to discard from every dataset).
+    role: Literal["intel", "allowlist"] = "intel"
     fetch: FetchConfig
     parse: ParseConfig
-    output_types: list[Literal["ip", "network", "domain", "url", "md5", "sha256", "email"]]
+    output_types: list[Literal["ip", "network", "domain", "url", "md5", "sha256", "email", "asn"]]
     # Field mapping from a normalized field name to a raw row key/column.
     fields: dict[str, str] = Field(default_factory=dict)
     # Type routing: for feeds that classify each row by a "type"/"value" pair
@@ -161,6 +175,10 @@ class FeedConfig(BaseModel):
         unknown = types - set(INDICATOR_TYPES)
         if unknown:
             raise ValueError(f"feed {self.fixture_key()!r}: unknown output_types {sorted(unknown)}")
+        if self.role == "allowlist" and self.output_types != ["domain"]:
+            raise ValueError(
+                f"feed {self.fixture_key()!r}: allowlist feeds must output exactly ['domain']"
+            )
         for kind in types:
             if kind not in self.fields:
                 raise ValueError(
@@ -246,6 +264,20 @@ class ScoringSettings(BaseModel):
     max_single_source_score: dict[str, int] = Field(default_factory=dict)
     source_count_caps: dict[int, int] = Field(default_factory=lambda: {1: 70, 2: 90, 3: 100})
     min_confidence: int = 0
+    # Optional per-IOC-type export floor (0..100), keyed by indicator type. When a
+    # type is listed its floor replaces ``min_confidence`` for that dataset, so
+    # single-source types (e.g. OTX-only emails) can be published while the
+    # global precision floor stays strict for corroborated types.
+    min_confidence_by_type: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_floors(self) -> ScoringSettings:
+        for ioc_type, floor in self.min_confidence_by_type.items():
+            if ioc_type not in INDICATOR_TYPES:
+                raise ValueError(f"min_confidence_by_type key {ioc_type!r} is not a known type")
+            if not 0 <= floor <= 100:
+                raise ValueError(f"min_confidence_by_type[{ioc_type}] must be 0..100")
+        return self
 
 
 class AsnSettings(BaseModel):
@@ -273,7 +305,8 @@ class OutputSettings(BaseModel):
     )
     asn_columns: list[str] = Field(
         default_factory=lambda: [
-            "asn", "asn_name", "country", "confidence_score", "malicious_ip_count", "source_count", "sources",
+            "asn", "asn_name", "country", "confidence_score", "source_count", "sources", "categories",
+            "first_seen", "last_seen",
         ]
     )
     domain_columns: list[str] = Field(

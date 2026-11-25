@@ -37,6 +37,6 @@ def write_schemas(out_dir: Path) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     src = out_dir / "sources.schema.json"
     cfg = out_dir / "settings.schema.json"
-    src.write_text(json.dumps(sources_schema(), indent=2) + "\n", encoding="utf-8")
-    cfg.write_text(json.dumps(settings_schema(), indent=2) + "\n", encoding="utf-8")
+    src.write_text(json.dumps(sources_schema(), indent=2) + "\n", encoding="utf-8", newline="\n")
+    cfg.write_text(json.dumps(settings_schema(), indent=2) + "\n", encoding="utf-8", newline="\n")
     return src, cfg

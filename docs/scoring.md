@@ -86,6 +86,49 @@ treated as very high confidence:
 | 2       | 90  |
 | 3+      | 100 |
 
+The shipped per-source caps in `config/settings.yaml`:
+
+| Source id | Single-source cap | Rationale |
+|-----------|-------------------|-----------|
+| `spamhaus` | 90 | Authoritative DROP / ASN-DROP; must clear the 75 floor |
+| `alienvault_otx` | 55 | Broad, noisy multi-type feed |
+| `cins`, `ipsum`, `dshield`, `linuxtracker` | 50–55 | Weak single-signal lists |
+| `jamesbrine`, `joewein`, `nocoin`, `disconnect`, `bbcan177`, `minerchk` | 45–50 | Low-specificity scanners/spam |
+
+A per-source cap only affects **single-source** rows; corroborated rows use the
+2/3+ bands.
+
+### ASN scores come from ASN lists, not from IPs
+
+`malicious_asns` is a first-class `asn` indicator type fed **only** by
+authoritative ASN-level lists (Spamhaus ASN-DROP). An ASN is never derived by
+rolling up flagged IPs: a single malicious IP inside a large provider would
+otherwise mark the entire ASN as malicious (a false positive with major
+operational cost). The `asn`/`asn_name`/`country` columns on `malicious_ips` and
+`malicious_networks` are **context only** and do not imply the ASN is bad.
+
+### `min_confidence` (precision floor)
+
+`config/settings.yaml` sets `min_confidence: 75`. Rows below it are not
+exported at all:
+
+- Single-source non-authoritative rows (cap 70) are dropped.
+- OTX-only rows (cap 55) are dropped, so `md5`/`sha256`/`email` only appear when
+  another source corroborates them.
+- Spamhaus DROP/ASN-DROP rows survive because `spamhaus` has a single-source cap
+  of 90.
+
+Allowlist feeds (`role: allowlist`, e.g. alphaMountain top1M) are never scored
+and never appear in the confidence bands. Their hostnames are removed from the
+candidate set before scoring, so matching domain/url indicators are suppressed
+outright rather than down-weighted.
+
+Consumers therefore receive a pre-filtered, precision-oriented dataset and can
+apply their own higher thresholds (e.g. 90) for automated response. Raising
+`min_confidence` trades coverage for precision; lowering it to 0 restores full
+coverage.
+
+
 ## Final formula
 
 ```
@@ -95,7 +138,8 @@ score = min(score, band_cap)
 
 ## Guarantees (covered by unit tests)
 
-- **Single source → 40–70.** A fresh trusted source lands at its band cap.
+- **Single source → 40–70** by default; authoritative Spamhaus is allowed up to
+  90 so it clears the export floor. A fresh trusted source lands at its cap.
 - **Two trusted sources → 75–90.**
 - **Three or more trusted sources → 90–100.**
 - **One low-confidence source never scores very high** (OTX is capped at 55).

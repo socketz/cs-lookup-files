@@ -45,6 +45,15 @@ def test_single_trusted_source_in_band():
     assert _scores(df) == [70]  # cap for the single-source band
 
 
+def test_spamhaus_single_source_cap_allows_authoritative_rows():
+    """Spamhaus DROP/ASN-DROP must clear the 75 precision floor on their own."""
+    df = _df([["spamhaus"]])
+    caps = {"spamhaus": 90}
+    settings = ScoringSettings(max_single_source_score=dict(caps))
+    scores = score.score_df(df, {"spamhaus": 100}, settings, caps, RUN_TIME, "k")
+    assert scores["confidence_score"].to_list() == [90]
+
+
 def test_single_low_trust_source_capped():
     df = _df([["alienvault_otx"]])
     assert _scores(df) == [55]

@@ -121,7 +121,7 @@ def test_repo_sources_validate():
     data = safe_load((BASE_DIR / "config" / "sources.yaml").read_text(encoding="utf-8"))
     sources = SourcesFile.model_validate(data)
     ids = {s.id for s in sources.sources}
-    assert {"firehol", "spamhaus", "abusech", "abuseipdb", "alienvault_otx"} <= ids
+    assert {"firehol", "spamhaus", "abusech", "abuseipdb", "alienvault_otx", "alphamountain"} <= ids
     for source in sources.sources:
         assert 0 <= source.weight <= 100
         assert source.feeds  # every source declares at least one feed
@@ -134,7 +134,33 @@ def test_repo_settings_validate():
     settings = Settings.model_validate(data)
     assert settings.scoring.ttl_days == 90
     assert settings.scoring.half_life_days == 30
-    assert settings.scoring.max_single_source_score == {"alienvault_otx": 55}
+    assert settings.scoring.min_confidence == 75
+    # Authoritative Spamhaus rows must clear the precision floor on their own.
+    assert settings.scoring.max_single_source_score["spamhaus"] == 90
+    assert settings.scoring.max_single_source_score["alienvault_otx"] == 55
+    # malicious_ip_count was removed from the ASN dataset contract.
+    assert "malicious_ip_count" not in settings.output.asn_columns
+
+
+def test_jsonl_parse_does_not_require_records():
+    cfg = ParseConfig(format="jsonl")
+    assert cfg.format == "jsonl"
+
+
+def test_allowlist_role_requires_domain_output():
+    with pytest.raises(ValueError):
+        FeedConfig.model_validate(
+            _valid_feed(role="allowlist", output_types=["ip"], fields={"ip": "line"})
+        )
+    ok = FeedConfig.model_validate(
+        _valid_feed(role="allowlist", output_types=["domain"], fields={"domain": "hostname"})
+    )
+    assert ok.role == "allowlist"
+
+
+def test_feed_role_defaults_to_intel():
+    feed = FeedConfig.model_validate(_valid_feed())
+    assert feed.role == "intel"
 
 
 def test_no_secrets_in_sources_config():

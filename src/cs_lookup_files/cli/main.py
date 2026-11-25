@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -18,10 +19,20 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+logger = logging.getLogger("cs_lookup_files.cli")
+
 
 def _configure_logging(verbose: bool) -> None:
+    """UTC-timestamped logs; silence httpx INFO noise unless ``--verbose``."""
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+    logging.Formatter.converter = time.gmtime
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)sZ %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.DEBUG if verbose else logging.WARNING)
 
 
 def _load_paths(config_dir: Path) -> tuple[SourcesFile, Settings]:
@@ -72,7 +83,7 @@ def build(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
-    """Run the full ETL pipeline and export the three lookup datasets."""
+    """Run the full ETL pipeline and export the consolidated lookup datasets."""
     _configure_logging(verbose)
     run_time = _run_time_now()
     version = version or _version_from(run_time)
@@ -100,20 +111,23 @@ def build(
         raise typer.Exit(code=1) from exc
 
     for src in result.source_results:
-        typer.echo(f"  {src.source_id:<20} {src.status:<8} records={src.records}")
+        logger.info("source=%s status=%s records=%d", src.source_id, src.status, src.records)
+    if result.empty_datasets:
+        logger.warning("empty datasets omitted: %s", ", ".join(result.empty_datasets))
     if result.output_files:
-        typer.echo(f"version {result.version} wrote: {', '.join(result.output_files)}")
+        logger.info("version %s wrote: %s", result.version, ", ".join(result.output_files))
 
 
 @app.command()
 def collect(
     source_id: Annotated[str | None, typer.Argument(help="Collect only this source")] = None,
     config_dir: Annotated[Path, typer.Option("--config-dir")] = Path("config"),
+    cache_dir: Annotated[Path, typer.Option("--cache-dir")] = Path("cache"),
     offline: Annotated[bool, typer.Option("--offline")] = False,
     offline_dir: Annotated[Path | None, typer.Option("--offline-dir")] = None,
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
-    """Fetch and normalize each source, printing row counts without exporting."""
+    """Fetch and normalize each source, logging row counts without exporting."""
     _configure_logging(verbose)
     run_time = _run_time_now()
     sources, _settings = _load_paths(config_dir)
@@ -122,7 +136,7 @@ def collect(
         if offline:
             base = Path(offline_dir) if offline_dir else Path("fixtures")
             return (base / feed.fixture_key()).read_text(encoding="utf-8")
-        return fetch.fetch_text(feed.fetch, feed.parse)
+        return fetch.fetch_text(feed.fetch, feed.parse, cache_dir=cache_dir)
 
     for cfg in sources.sources:
         if not cfg.enabled:
@@ -138,11 +152,12 @@ def collect(
                 )
             else:
                 counts = "empty"
-            typer.echo(
-                f"  {out.source_id:<20} {out.status:<8} rows={out.df.height} [{counts}]"
+            logger.info(
+                "source=%s status=%s rows=%d types=[%s]",
+                out.source_id, out.status, out.df.height, counts,
             )
         except Exception as exc:  # noqa: BLE001
-            typer.echo(f"  {cfg.id:<20} failed: {exc}", err=True)
+            logger.error("source=%s failed: %s", cfg.id, exc)
 
 
 @app.command()

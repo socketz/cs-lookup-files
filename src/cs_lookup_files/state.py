@@ -40,14 +40,22 @@ def _update_entry(
     type_: str,
     value: str,
     run_time: datetime,
+    asn_name: str | None = None,
+    country: str | None = None,
 ) -> IndicatorState:
     if entry is None:
-        return IndicatorState(type=type_, value=value, first_seen=run_time, last_seen=run_time, sources={})
+        return IndicatorState(
+            type=type_, value=value, first_seen=run_time, last_seen=run_time,
+            sources={}, asn_name=asn_name, country=country,
+        )
     first_seen = min(entry.first_seen, run_time)
     last_seen = max(entry.last_seen, run_time)
     return IndicatorState(
         type=entry.type or type_, value=entry.value or value,
         first_seen=first_seen, last_seen=last_seen, sources=dict(entry.sources),
+        # Keep the last known identity metadata when a feed omits it.
+        asn_name=asn_name or entry.asn_name,
+        country=country or entry.country,
     )
 
 
@@ -77,7 +85,14 @@ def merge_state(
             key = _indicator_key(row)
             type_ = str(row["type"])
             value = str(row["value"])
-            entry = _update_entry(indicators.get(key), type_, value, run_time)
+            entry = _update_entry(
+                indicators.get(key),
+                type_,
+                value,
+                run_time,
+                asn_name=row.get("asn_name"),
+                country=row.get("country"),
+            )
             for source in row["sources"]:
                 entry.sources[str(source)] = entry.sources.get(str(source), 0) + 1
             indicators[key] = entry
@@ -106,7 +121,7 @@ def merge_state(
 
 def _carryover_row(entry: IndicatorState, categories_fn: CategoriesFn) -> Row:
     sources = sorted(entry.sources)
-    return {
+    row: Row = {
         "value": entry.value,
         "sort_key": sort_key(cast(IndicatorType, entry.type), entry.value),
         "type": entry.type,
@@ -118,6 +133,16 @@ def _carryover_row(entry: IndicatorState, categories_fn: CategoriesFn) -> Row:
         "ip_int": None, "ip_version": None, "ip_key": None,
         "start_int": None, "family": None, "start_key": None, "prefix": None,
     }
+    # Authoritative ASN rows keep their identity metadata when the feed is
+    # temporarily unavailable, so a carried-over row still exports name/country.
+    if entry.type == "asn":
+        try:
+            row["asn"] = int(entry.value)
+        except ValueError:
+            row["asn"] = None
+        row["asn_name"] = entry.asn_name
+        row["country"] = entry.country
+    return row
 
 
 def _attach_history(

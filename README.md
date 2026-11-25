@@ -4,19 +4,30 @@ Aggregate free threat-intel feeds, normalize and score the indicators, then
 publish a small set of lookup files tuned for **CrowdStrike Falcon**.
 
 The project is intentionally **not** a full TIP. It consumes free and publicly
-available feeds, merges them into three consolidated datasets, and publishes
-them as GitHub Release artifacts for automated ingestion via Fusion SOAR, Falcon
-LogScale hunts, and correlation rules.
+available feeds, merges them into consolidated datasets, and publishes them as
+GitHub Release artifacts for Falcon LogScale hunts, correlation rules, Fusion
+SOAR hunting playbooks, and investigations.
+
+## Scope: read-only context for threat hunting
+
+The datasets are **read-only lookup tables for Threat Hunting, investigation and
+enrichment**. They are not IOC Management input: importing them does not create,
+modify or delete CrowdStrike IOCs, does not enroll indicators for blocking, and
+does not trigger automated response. Nothing in this project calls the Falcon
+IOC APIs; it only publishes release artifacts.
+
+Typical use: join a lookup to events, filter by `confidence_score` (the export is
+already `>= 75`), and investigate. Docs: [`docs/crowdstrike.md`](docs/crowdstrike.md).
 
 ## Outputs
 
-Nine lookup files, plus JSON mirrors and metadata:
+Eight lookup files, plus JSON mirrors and metadata:
 
 | Dataset                | Purpose                                              |
 |------------------------|------------------------------------------------------|
-| `malicious_ips`        | Match IPv4/IPv6 in network, DNS, proxy and EDR logs  |
-| `malicious_networks`   | Subnet (CIDR) reputation and network investigations  |
-| `malicious_asns`       | Provider-level infrastructure reputation             |
+| `malicious_ips`        | Match IPv4/IPv6 in network, DNS, proxy and EDR logs (ASN context) |
+| `malicious_networks`   | Subnet (CIDR) reputation and network investigations (ASN context) |
+| `malicious_asns`       | Authoritative ASN blocklist (Spamhaus ASN-DROP only)  |
 | `malicious_domains`    | Hostname / domain reputation                          |
 | `malicious_urls`       | URL / URI reputation                                  |
 | `malicious_md5`        | MD5 file hashes                                      |
@@ -24,8 +35,19 @@ Nine lookup files, plus JSON mirrors and metadata:
 | `malicious_emails`     | Sender / phishing email addresses                    |
 
 Each row is deduplicated, ASN-enriched (for IPs/networks), scored 0–100 and
-time-boxed by first/last observation. See [`docs/`](docs/) for the scoring
-model, source catalogue, and CrowdStrike integration examples.
+time-boxed by first/last observation. `malicious_asns` is **never** derived from
+flagged IPs: an ASN is listed only when an authoritative ASN-level list
+(Spamhaus ASN-DROP) names it, so a single bad IP cannot mark a whole provider.
+The export applies `min_confidence: 75`, so only corroborated or authoritative
+rows are published.
+
+Datasets with zero rows are **not written**. A missing file means "no qualifying
+indicators this run"; `metadata.json` reports `ioc_counts` (0) and
+`empty_datasets`, and consumers should tolerate absence (keep the previous
+lookup on 404) rather than importing an empty table.
+
+See [`docs/`](docs/) for the scoring model, source catalogue, and CrowdStrike
+integration examples.
 
 ### Example `malicious_ips.csv`
 
@@ -86,10 +108,13 @@ confidence decays with age, not on every rebuild.
 - `config/sources.schema.json` / `config/settings.schema.json` — JSON Schema
   describing the accepted config structure (regenerated via `cs-lookup-files schema`).
 
-Supported indicator types: `ip`, `network` (CIDR), `domain` (hostname),
-`url`, `md5`, `sha256`, `email`. Each source declares its `output_types`; feeds
-that classify rows by a type/value pair (e.g. OTX) use `type_field` +
-`value_field` + `type_map`.
+Supported indicator types: `ip`, `network` (CIDR), `asn` (authoritative ASN
+lists), `domain` (hostname), `url`, `md5`, `sha256`, `email`. Each source
+declares its `output_types`; feeds that classify rows by a type/value pair
+(e.g. OTX) use `type_field` + `value_field` + `type_map` (case-insensitive).
+A feed may also set `role: allowlist` (e.g. alphaMountain top1M): it is parsed
+but never scored or exported, and its hostnames suppress matching domain/url
+indicators so legitimate-but-compromised sites are discarded, not down-weighted.
 
 API keys referenced as `$VAR` in config are resolved from the shell environment,
 the CI workflow `env:` block, or a local `.env` loaded at startup (python-dotenv;
@@ -98,6 +123,14 @@ A source whose required key is missing is **skipped** (not failed) until the key
 is configured, so a fresh clone works without any secrets. Optional per-source
 `requests_per_minute` keeps parallel fetches polite; global `max_workers`
 bounds concurrency in `settings.yaml`.
+
+AbuseIPDB's free tier allows **5 blacklist requests/day**. The AbuseIPDB feed
+therefore sets `cache_ttl_hours: 24`, `max_requests_per_day: 5`, `retries: 0`
+and `requests_per_minute: 5`; the daily counter and cached body live under
+`cache/`. The build workflow persists `cache/` with `actions/cache@v6`, so four
+6-hourly runs make at most one call per day; if the cache is cold the worst case
+is 4 calls, still within the limit. An exhausted quota is reported as `skipped`
+(reason `rate limit`), never `failed`.
 
 ## Development
 

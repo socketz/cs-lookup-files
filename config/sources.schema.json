@@ -162,7 +162,7 @@
     },
     "FeedConfig": {
       "additionalProperties": false,
-      "description": "One file/URL within a source: how to fetch, parse and clean it.\n\nA *source* (e.g. ``firehol``) groups several feeds (URLs); each feed declares\nthe IOC types it yields and its own parser/field mapping/clean ops.",
+      "description": "One file/URL within a source: how to fetch, parse and clean it.\n\nA *source* (e.g. ``firehol``) groups several feeds (URLs); each feed declares\nthe IOC types it yields and its own parser/field mapping/clean ops.\n\n``role`` separates threat-intel feeds from allowlist feeds. An allowlist\nfeed is parsed but never scored or exported: its domains are used to\nsuppress matching indicators from the consolidated datasets. This is how\nlegitimate-but-compromised sites (e.g. alphaMountain top1M) are discarded\nrather than down-weighted.",
       "properties": {
         "id": {
           "anyOf": [
@@ -177,6 +177,15 @@
           ],
           "default": null,
           "title": "Id"
+        },
+        "role": {
+          "default": "intel",
+          "enum": [
+            "intel",
+            "allowlist"
+          ],
+          "title": "Role",
+          "type": "string"
         },
         "fetch": {
           "$ref": "#/$defs/FetchConfig"
@@ -193,7 +202,8 @@
               "url",
               "md5",
               "sha256",
-              "email"
+              "email",
+              "asn"
             ],
             "type": "string"
           },
@@ -326,6 +336,32 @@
           ],
           "default": null,
           "title": "Requests Per Minute"
+        },
+        "cache_ttl_hours": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Ttl Hours"
+        },
+        "max_requests_per_day": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Requests Per Day"
         }
       },
       "required": [
@@ -401,7 +437,8 @@
             "cidr_lines",
             "csv",
             "tsv",
-            "json"
+            "json",
+            "jsonl"
           ],
           "title": "Format",
           "type": "string"

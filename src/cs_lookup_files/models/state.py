@@ -10,11 +10,15 @@ class IndicatorState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: str  # indicator type: ip | network | domain | md5 | sha256
-    value: str  # display value (IP address, canonical CIDR, domain, hash)
+    type: str  # indicator type: ip | network | asn | domain | md5 | sha256 | email | url
+    value: str  # display value (IP address, canonical CIDR, ASN, domain, hash)
     first_seen: datetime
     last_seen: datetime
     sources: dict[str, int] = Field(default_factory=dict)
+    # Authoritative ASN context (Spamhaus ASN-DROP); persisted so carry-over
+    # rows keep their name/country when the feed is temporarily unavailable.
+    asn_name: str | None = None
+    country: str | None = None
 
 
 class State(BaseModel):

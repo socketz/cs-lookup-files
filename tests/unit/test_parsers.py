@@ -33,6 +33,20 @@ def test_parse_json_records_path():
     assert [r["ip"] for r in rows] == ["1.2.3.4", "8.8.8.8"]
 
 
+def test_parse_jsonl_one_object_per_line():
+    text = (
+        '{"asn": 60971, "asname": "AS60971-NET", "cc": "EU"}\n'
+        "\n"
+        '{"asn": 211468, "asname": "AS211468-MALIWARE", "cc": "DE"}\n'
+        '{"type": "metadata", "timestamp": "2026-11-23T00:00:00Z"}\n'
+        "not-json\n"
+    )
+    cfg = ParseConfig(format="jsonl")
+    rows = parsers.parse_rows(text, cfg)
+    assert [r.get("asn") for r in rows] == [60971, 211468, None]
+    assert rows[2]["type"] == "metadata"
+
+
 def test_parse_csv_with_otx_header():
     text = '"type","indicator","pulse"\n"IPv4","1.2.3.4","p"\n"IPv4","5.6.7.8","q"\n'
     cfg = ParseConfig(format="csv", delimiter=",", has_header=True)

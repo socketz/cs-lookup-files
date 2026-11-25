@@ -162,3 +162,91 @@ def test_first_page_failure_raises_fetch_error(monkeypatch):
         pass
     else:
         raise AssertionError("expected FetchError")
+
+
+def test_fresh_cache_is_reused_without_http(monkeypatch, tmp_path):
+    from cs_lookup_files.collectors.cache import HttpCache
+
+    url = "https://api.example.org/blacklist"
+    HttpCache(tmp_path).store(url, "cached-body")
+    cfg = FetchConfig(url=url, cache_ttl_hours=24)
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def get(self, *a, **k):
+            raise AssertionError("HTTP must not be called on a cache hit")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(fetch.httpx, "Client", _Client)
+    assert fetch.fetch_text(cfg, None, cache_dir=tmp_path) == "cached-body"
+
+
+def test_expired_cache_triggers_request_and_rewrites(monkeypatch, tmp_path):
+    import json
+    from datetime import UTC, datetime
+
+    from cs_lookup_files.collectors.cache import HttpCache
+
+    url = "https://api.example.org/blacklist"
+    cache = HttpCache(tmp_path)
+    path = cache.path_for(url)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old = datetime(2020, 1, 1, tzinfo=UTC).isoformat()
+    path.write_text(json.dumps({"url": url, "fetched_at": old, "body": "stale"}), encoding="utf-8")
+    cfg = FetchConfig(url=url, cache_ttl_hours=24)
+
+    class _Resp:
+        status_code = 200
+        text = "fresh-body"
+
+        def raise_for_status(self):
+            pass
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def get(self, *a, **k):
+            return _Resp()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(fetch.httpx, "Client", _Client)
+    assert fetch.fetch_text(cfg, None, cache_dir=tmp_path) == "fresh-body"
+    assert cache.load(url, ttl_hours=24) == "fresh-body"
+
+
+def test_daily_quota_exhaustion_raises_rate_limited(monkeypatch, tmp_path):
+    from urllib.parse import urlparse
+
+    from cs_lookup_files.collectors.cache import DailyQuota
+
+    url = "https://api.example.org/blacklist"
+    host = urlparse(url).netloc
+    quota = DailyQuota(tmp_path)
+    for _ in range(5):
+        assert quota.try_acquire(host, 5)
+    cfg = FetchConfig(url=url, max_requests_per_day=5)
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def get(self, *a, **k):
+            raise AssertionError("HTTP must not be called when quota is exhausted")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(fetch.httpx, "Client", _Client)
+    try:
+        fetch.fetch_text(cfg, None, cache_dir=tmp_path)
+    except fetch.RateLimited as exc:
+        assert exc.max_per_day == 5
+    else:
+        raise AssertionError("expected RateLimited")

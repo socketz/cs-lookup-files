@@ -27,15 +27,16 @@ the `config/sources.yaml` block it would affect.
 - [ ] Documentation / CrowdStrike integration examples
 
 **Scope check**
-This project deliberately publishes only three consolidated datasets from free,
-bulk feeds. Confirm the proposal fits:
+This project deliberately publishes a small set of consolidated datasets from
+free, bulk feeds. Confirm the proposal fits:
 
-- [ ] Keeps the three-dataset promise (`malicious_ips`, `malicious_networks`,
-  `malicious_asns`) with no source-specific outputs
+- [ ] Keeps the consolidated datasets (`malicious_ips`, `malicious_networks`,
+  `malicious_asns`, `malicious_domains`, `malicious_urls`, `malicious_md5`,
+  `malicious_sha256`, `malicious_emails`) with no source-specific outputs
 - [ ] Uses bulk feed downloads, not per-indicator API lookups
 - [ ] Stays within free tiers and does not require paid data
-- [ ] Does not add out-of-scope intelligence (domains, URLs, file hashes,
-  malware-family attribution, case management or full TIP features)
+- [ ] Does not add out-of-scope intelligence (malware-family attribution,
+  case management or full TIP features)
 
 **Alternatives considered**
 Other approaches you considered, and why you rejected them.

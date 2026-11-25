@@ -1,0 +1,4 @@
+{"asn": 60971, "rir": "RIPE", "domain": "asn60971.example", "cc": "EU", "asname": "AS60971-NET"}
+{"asn": 211468, "rir": "RIPE", "domain": "malware.example", "cc": "DE", "asname": "AS211468-MALIWARE"}
+{"asn": 37631, "rir": "ARIN", "domain": "spamhouse.example", "cc": "ZZ", "asname": "AS37631-SPAMHOUSE"}
+{"type": "metadata", "timestamp": "2026-11-23T00:00:00Z"}

@@ -35,7 +35,7 @@ class NetworkRecord(BaseModel):
 
 
 class AsnRecord(BaseModel):
-    """Schema of a row in ``malicious_asns``."""
+    """Schema of a row in ``malicious_asns`` (authoritative ASN lists only)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -43,6 +43,8 @@ class AsnRecord(BaseModel):
     asn_name: str | None = None
     country: str | None = None
     confidence_score: int = Field(ge=0, le=100)
-    malicious_ip_count: int = Field(ge=0)
     source_count: int = Field(ge=0)
     sources: str
+    categories: str
+    first_seen: str
+    last_seen: str

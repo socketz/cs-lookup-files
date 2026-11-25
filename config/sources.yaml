@@ -5,8 +5,8 @@
 # by several feeds of the same origin count as ONE confirming source.
 #
 # Each source has a global `weight` and an optional per-IOC-type `ioc_weights`
-# (ip/network/domain/url/md5/sha256/email). Each feed declares the IOC types it
-# yields plus its own fetch/parse/fields/clean (and optional category override).
+# (ip/network/asn/domain/url/md5/sha256/email). Each feed declares the IOC types
+# it yields plus its own fetch/parse/fields/clean (and optional category override).
 #
 # Adding a feed is config-only; no core code changes are required.
 #
@@ -174,6 +174,19 @@ sources:
         fields: {network: cidr}
         clean: [{op: drop_bogon_networks}]
 
+      # Authoritative ASN-level blocklist (JSONL, one object per line plus a
+      # trailing {"type":"metadata"} line). This is the ONLY source of the
+      # malicious_asns dataset: ASNs are never derived from flagged IPs.
+      - id: spamhaus_asndrop
+        categories: {default: [blocklist]}
+        fetch:
+          url: https://www.spamhaus.org/drop/asndrop.json
+          timeout_seconds: 60
+        parse: {format: jsonl}
+        output_types: [asn]
+        fields: {asn: asn, asn_name: asname, country: cc}
+        clean: []
+
   # --------------------------------------------------------------- Abuse.ch
   - id: abusech
     enabled: true
@@ -204,7 +217,12 @@ sources:
             Key: "$ABUSEIPDB_API_KEY"
             Accept: "application/json"
           timeout_seconds: 60
-          requests_per_minute: 30
+          requests_per_minute: 5
+          # Free tier allows 5 blacklist requests/day. Cache the body for 24h
+          # and persist a daily quota so 4 scheduled runs never exceed it.
+          cache_ttl_hours: 24
+          max_requests_per_day: 5
+          retries: 0
         parse: {format: json, records: "data.list"}
         output_types: [ip]
         fields: {ip: ipAddress, last_seen: lastReportedAt}
@@ -264,24 +282,32 @@ sources:
           timeout_seconds: 60
           requests_per_minute: 120
           retries: 3
-        parse: {format: csv, delimiter: ",", has_header: true}
-        output_types: [ip, domain, url, md5, sha256, email]
-        type_field: "0"
-        value_field: "1"
+        # The export endpoint returns JSON: {"results": [...], "count": N}.
+        parse: {format: json, records: results}
+        output_types: [ip, network, domain, url, md5, sha256, email]
+        type_field: "type"
+        value_field: "indicator"
+        # Canonical OTX indicator type labels (IndicatorTypes.py in the OTX SDK).
+        # Routing is case-insensitive, so lower-case variants also match.
         type_map:
           IPv4: ip
           IPv6: ip
-          ipv4: ip
-          ipv6: ip
           domain: domain
           hostname: domain
-          url: url
           URL: url
-          filehash-md5: md5
-          filehash-sha256: sha256
+          URI: url
+          FileHash-MD5: md5
+          FileHash-SHA256: sha256
           email: email
-          Email: email
-        fields: {ip: "1", domain: "1", url: "1", md5: "1", sha256: "1", email: "1"}
+          CIDR: network
+        fields:
+          ip: "indicator"
+          network: "indicator"
+          domain: "indicator"
+          url: "indicator"
+          md5: "indicator"
+          sha256: "indicator"
+          email: "indicator"
         clean: []
 
   # ------------------------------------------------- Wave 1: extra IP feeds
@@ -412,6 +438,12 @@ sources:
         parse: {format: plain_lines, comment_prefix: "#"}
         output_types: [url]
         fields: {url: line}
+        clean: []
+      - id: botvrij_sha256
+        fetch: {url: "http://www.botvrij.eu/data/ioclist.sha256.raw", timeout_seconds: 60}
+        parse: {format: plain_lines, comment_prefix: "#"}
+        output_types: [sha256]
+        fields: {sha256: line}
         clean: []
 
   # James Brine brute-force hosts (CSV: ipv4, activity, date).
@@ -565,3 +597,65 @@ sources:
         output_types: [ip, url]
         fields: {ip: IP, url: URL}
         clean: [{op: drop_private}]
+
+  # TweetFeed: community multi-type feed (JSON array of today's IOCs).
+  # Corroborates OTX for hashes/domains/URLs so single-source rows can clear
+  # the precision floor.
+  - id: tweetfeed
+    enabled: true
+    weight: 70
+    ioc_weights: {ip: 70, domain: 72, url: 75, md5: 70, sha256: 70}
+    categories: {default: [malware]}
+    feeds:
+      - id: tweetfeed_today
+        fetch:
+          url: https://api.tweetfeed.live/v1/today
+          timeout_seconds: 60
+        parse: {format: json, records: "$"}
+        output_types: [ip, domain, url, md5, sha256]
+        type_field: "type"
+        value_field: "value"
+        type_map:
+          ip: ip
+          domain: domain
+          url: url
+          md5: md5
+          sha256: sha256
+        fields:
+          ip: "value"
+          domain: "value"
+          url: "value"
+          md5: "value"
+          sha256: "value"
+        clean: []
+
+  # alphaMountain: a community threat domain list plus the top1M legitimate
+  # hostnames. The top1M feed is an ALLOWLIST (role: allowlist): its domains are
+  # never exported; they suppress matching domain/url indicators from every
+  # dataset so legitimate-but-compromised sites are discarded, not down-weighted.
+  - id: alphamountain
+    enabled: true
+    weight: 80
+    categories: {default: [malware]}
+    feeds:
+      - id: alphamountain_top1m
+        role: allowlist
+        fetch:
+          url: https://files.alphamountain.ai/alphaMountain-top1M.csv
+          timeout_seconds: 120
+          # ~22 MB; refresh once a day instead of on every 6-hour run.
+          cache_ttl_hours: 24
+        parse: {format: csv, delimiter: ",", has_header: true}
+        output_types: [domain]
+        fields: {domain: hostname}
+        clean: []
+
+      - id: alphamountain_threat
+        fetch:
+          url: https://files.alphamountain.ai/alphaMountain-community-threat-1000.csv
+          timeout_seconds: 60
+          cache_ttl_hours: 24
+        parse: {format: csv, delimiter: ",", has_header: true}
+        output_types: [domain]
+        fields: {domain: hostname}
+        clean: []

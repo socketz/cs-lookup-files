@@ -86,6 +86,11 @@ The project should optimize outputs for:
 
 The generated datasets should be directly consumable by CrowdStrike without requiring additional processing.
 
+**Outputs are read-only hunting context.** The datasets enrich events and
+support investigations; they do not mutate IOCs, are not imported into IOC
+Management, and never trigger blocking or automated response. The pipeline only
+publishes release artifacts; it never calls Falcon IOC APIs.
+
 ---
 
 # Intelligence Sources
@@ -141,6 +146,12 @@ The solution must remain sustainable even if AbuseIPDB API quotas are reduced.
 
 The repository owner currently has AbuseIPDB Webmaster status, but the architecture must not depend on elevated API consumption.
 
+**Free-tier safeguard:** the AbuseIPDB feed declares `cache_ttl_hours: 24` and
+`max_requests_per_day: 5` (free tier = 5 blacklist requests/day) with
+`retries: 0`. The body cache and the persisted daily counter live under
+`cache/`, which the CI persists via `actions/cache`. An exhausted quota is
+reported as `skipped` (reason `rate limit`), never `failed`.
+
 ### DShield (dshield_intelfeed)
 
 `isc.sans.edu/api/intelfeed` — daily IP summary with feed labels; benign
@@ -152,6 +163,22 @@ Frequently-updated FireHOL `.netset`/`.ipset` sets (feodo_badips, c2_tracker,
 cybercrime, et_compromised, blocklist_de, ciarmy, dshield, greensnow,
 bruteforceblocker, stopforumspam, cybercure) — high-churn IP feeds selected for
 operational value.
+
+### alphaMountain (alphamountain)
+
+Two CSVs from [alphaMountain](https://www.alphamountain.ai/):
+
+- `alphaMountain-community-threat-1000.csv` — community threat domains
+  (`hostname`), scored as a normal `domain` source (weight 80).
+- `alphaMountain-top1M.csv` — top one million legitimate hostnames
+  (`hostname`). Declared with `role: allowlist`: its domains are collected but
+  **never scored or exported**; they suppress matching `domain`/`url` indicators
+  from every dataset so legitimate-but-compromised sites are discarded rather
+  than down-weighted. The allowlist is applied to the fresh frame and to
+  carried-over state, so suppressed domains cannot reappear from `state.json`.
+
+Both feeds are cached for 24 hours (`cache_ttl_hours: 24`) because the top1M
+file is ~22 MB and does not change intraday.
 
 ---
 
@@ -181,9 +208,9 @@ No modifications to core logic should be required when adding new sources.
 
 # Generated Lookup Files
 
-One consolidated dataset per supported IOC type, plus the ASN rollup. No
-source-specific exports; everything converges into these files so Falcon
-consumers have a small, predictable surface.
+One consolidated dataset per supported IOC type, plus the authoritative ASN
+dataset. No source-specific exports; everything converges into these files so
+Falcon consumers have a small, predictable surface.
 
 ## malicious_ips
 
@@ -250,9 +277,11 @@ Fields:
 - asn_name
 - country
 - confidence_score
-- malicious_ip_count
 - source_count
 - sources
+- categories
+- first_seen
+- last_seen
 
 Example:
 
@@ -260,6 +289,13 @@ Example:
 asn,asn_name,country,confidence_score
 13335,CLOUDFLARENET,US,75
 ```
+
+**ASN is authoritative only.** `malicious_asns` is a first-class `asn` indicator
+type fed exclusively by authoritative ASN-level lists (Spamhaus ASN-DROP,
+JSONL). It is never derived by rolling up flagged IPs/networks: a single bad IP
+must not mark an entire ASN as malicious. The `asn`/`asn_name`/`country`
+columns on `malicious_ips` and `malicious_networks` are **context only** and do
+not imply the ASN is malicious. `malicious_ip_count` is not part of the dataset.
 
 ---
 
@@ -433,6 +469,17 @@ Examples:
 - Two trusted sources → 75-90
 - Three or more trusted sources → 90-100
 
+**Export precision floor:** `min_confidence: 75` is applied at export, so single
+non-authoritative sources (cap 70) and OTX-only rows (cap 55) are not published;
+`spamhaus` carries a single-source cap of 90 so DROP/ASN-DROP rows survive.
+Corroborated rows use the 2/3+ bands. Datasets that end up empty are omitted and
+reported in `metadata.json` rather than published as empty lookups.
+
+**Allowlist feeds** (`role: allowlist`, e.g. alphaMountain top1M) are never
+scored. Their hostnames are removed from the candidate set before scoring and
+from carried-over state, so matching `domain`/`url` indicators are suppressed
+outright rather than down-weighted.
+
 ---
 
 # Technical Stack
@@ -594,6 +641,7 @@ against the generated lookup files.
 - AbuseIPDB blacklist integration
 - DShield intelfeed integration
 - FireHOL per-category IP sets
+- alphaMountain threat domains + top1M allowlist
 - ASN enrichment
 - Deduplication
 - Confidence scoring (global + per-IOC-type weights)

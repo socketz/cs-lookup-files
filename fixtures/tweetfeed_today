@@ -1,0 +1,8 @@
+[
+  {"type": "ip", "value": "91.194.90.11", "tags": ["#malware"]},
+  {"type": "domain", "value": "evil.example.org", "tags": ["#phishing"]},
+  {"type": "url", "value": "https://evil.example.org/download", "tags": ["#phishing"]},
+  {"type": "md5", "value": "d41d8cd98f00b204e9800998ecf8427e", "tags": ["#malware"]},
+  {"type": "sha256", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "tags": ["#malware"]},
+  {"type": "domain", "value": "tweetfeed-only.example", "tags": ["#malware"]}
+]

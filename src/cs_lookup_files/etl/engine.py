@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import time
+from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 import polars as pl
 
-from ..collectors.fetch import MissingSecret, PartialFetchError
+from ..collectors.fetch import MissingSecret, PartialFetchError, RateLimited
 from ..models.config import FeedConfig, SourceConfig
+from ..models.metadata import FeedStatus, SourceStatusKind
 from ..normalizers import indicators, ipaddr
 from ..normalizers.indicators import IndicatorType
 from ..normalizers.ops import OpContext, apply_clean_ops
@@ -20,9 +23,13 @@ logger = logging.getLogger("cs_lookup_files.engine")
 
 FetchFn = Callable[[SourceConfig, FeedConfig], str]
 
-SourceStatus = Literal["ok", "partial", "skipped", "failed"]
+# Per-feed status. ``empty`` means the fetch+parse succeeded but produced no
+# rows (informative; it never degrades the origin). ``partial`` is reserved for
+# a truncated download (pagination cut short by the wall-clock budget/failure).
+# Defined once in ``models.metadata`` so engine and metadata cannot drift.
+SourceStatus = SourceStatusKind
 
-TypeKey = str  # "ip", "network", "domain", "md5", "sha256"
+TypeKey = str  # "ip", "network", "domain", "md5", "sha256", "email", "asn"
 
 # Unified accumulator frame columns across all indicator types.
 COMMON_COLUMNS = ("value", "sort_key", "type", "sources", "categories", "last_seen")
@@ -39,6 +46,10 @@ class SourceOutput:
     status: SourceStatus
     records: int
     df: pl.DataFrame
+    feeds: list[FeedStatus] = field(default_factory=list)
+    # Canonical domains from ``role: allowlist`` feeds. These are never scored
+    # or exported; the pipeline uses them to suppress matching indicators.
+    allowlist: set[str] = field(default_factory=set)
 
 
 Row = dict[str, Any]
@@ -119,44 +130,83 @@ def _with_extras(row: Row, raw_row: Row) -> Row:
                 row["start_int"] = int(net.network_address) if net.version == 4 else None
         except ValueError:
             pass
+    elif type_ == "asn":
+        # Authoritative ASN rows (Spamhaus ASN-DROP) carry their own name and
+        # country; keep the ASN as an integer for the shared ``asn`` column.
+        row["asn"] = int(value)
+        asn_name = raw_row.get("asn_name")
+        country = raw_row.get("country")
+        if asn_name is not None and str(asn_name).strip():
+            row["asn_name"] = str(asn_name).strip()
+        if country is not None and str(country).strip():
+            row["country"] = str(country).strip()
     return row
 
 
 def run_source(source: SourceConfig, fetch_fn: FetchFn, run_time: datetime) -> SourceOutput:
     """Run every feed of a source, producing one unified indicator frame.
 
-    Each feed is fetched/parsed independently and its status aggregated:
-    ``ok`` if all feeds succeed, ``partial`` if some succeed/fail/skip, ``skipped``
-    if every feed lacks its required secret, ``failed`` if none succeed. The
-    ``sources`` column carries the origin id, so indicators confirmed by several
-    feeds of the same origin count as one confirming source for scoring.
+    Each feed is fetched/parsed independently and its own status recorded;
+    statuses are aggregated for the origin: ``failed`` only when every feed
+    failed, ``skipped`` only when every feed was skipped, ``partial`` when any
+    feed was truncated, otherwise ``ok`` (empty feeds alone do not degrade the
+    origin). The ``sources`` column carries the origin id, so indicators
+    confirmed by several feeds of the same origin count as one confirming source.
+
+    ``role: allowlist`` feeds are parsed into ``SourceOutput.allowlist`` and do
+    not contribute rows to the unified frame. The pipeline uses that set to
+    suppress matching indicators before scoring and export.
     """
     frames: list[pl.DataFrame] = []
     statuses: list[SourceStatus] = []
+    feed_runs: list[FeedStatus] = []
+    allowlist: set[str] = set()
     records = 0
+    started = time.monotonic()
     for feed in source.feeds:
-        status, df, recs = _run_feed(source, feed, fetch_fn, run_time)
+        status, df, recs, types, reason = _run_feed(source, feed, fetch_fn, run_time)
         statuses.append(status)
         records += recs
-        if not df.is_empty():
+        feed_runs.append(
+            FeedStatus(feed=feed.fixture_key(), status=status, rows=df.height, types=types, reason=reason)
+        )
+        if feed.role == "allowlist":
+            if not df.is_empty():
+                allowlist.update(str(value) for value in df["value"].to_list())
+        elif not df.is_empty():
             frames.append(df)
 
+    status = _aggregate_status(statuses)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "origin=%s status=%s feeds=%d ok=%d empty=%d failed=%d skipped=%d partial=%d rows=%d duration=%dms",
+        source.id,
+        status,
+        len(statuses),
+        statuses.count("ok"),
+        statuses.count("empty"),
+        statuses.count("failed"),
+        statuses.count("skipped"),
+        statuses.count("partial"),
+        records,
+        duration_ms,
+    )
     if not frames:
-        return SourceOutput(source.id, _aggregate_status(statuses), records, _empty_df())
+        return SourceOutput(source.id, status, records, _empty_df(), feed_runs, allowlist)
     combined = pl.concat(frames, how="vertical_relaxed") if len(frames) > 1 else frames[0]
-    return SourceOutput(source.id, _aggregate_status(statuses), records, combined)
+    return SourceOutput(source.id, status, records, combined, feed_runs, allowlist)
 
 
 def _aggregate_status(statuses: list[SourceStatus]) -> SourceStatus:
     if not statuses:
         return "failed"
-    if "ok" in statuses:
-        return "ok" if all(s == "ok" for s in statuses) else "partial"
-    if "partial" in statuses:
-        return "partial"
+    if all(s == "failed" for s in statuses):
+        return "failed"
     if all(s == "skipped" for s in statuses):
         return "skipped"
-    return "failed"
+    if any(s == "partial" for s in statuses):
+        return "partial"
+    return "ok"
 
 
 def _run_feed(
@@ -164,7 +214,8 @@ def _run_feed(
     feed: FeedConfig,
     fetch_fn: FetchFn,
     run_time: datetime,
-) -> tuple[SourceStatus, pl.DataFrame, int]:
+) -> tuple[SourceStatus, pl.DataFrame, int, dict[str, int], str | None]:
+    started = time.monotonic()
     text = ""
     partial = False
     try:
@@ -172,20 +223,36 @@ def _run_feed(
     except PartialFetchError as exc:
         text = exc.partial_text
         partial = True
+    except RateLimited as exc:
+        logger.warning("%s", exc)
+        _log_feed(source, feed, "skipped", 0, {}, started, "rate limit")
+        return ("skipped", _empty_df(), 0, {}, "rate limit")
     except MissingSecret as exc:
         logger.warning("%s", exc)
-        return ("skipped", _empty_df(), 0)
+        _log_feed(source, feed, "skipped", 0, {}, started, "missing secret")
+        return ("skipped", _empty_df(), 0, {}, "missing secret")
     except Exception as exc:  # noqa: BLE001 - intentionally tolerant
+        reason = f"{type(exc).__name__}: {exc}"
         logger.warning("source %s feed %s failed: %s", source.id, feed.fixture_key(), exc)
-        return ("failed", _empty_df(), 0)
+        _log_feed(source, feed, "failed", 0, {}, started, reason)
+        return ("failed", _empty_df(), 0, {}, reason)
+
+    if logger.isEnabledFor(logging.DEBUG):
+        head = [line[:200] for line in text.splitlines()[:2]]
+        logger.debug("feed=%s raw sample=%s", feed.fixture_key(), head)
 
     if not text.strip():
-        return ("partial", _empty_df(), 0)
+        reason = "empty body"
+        _log_feed(source, feed, "empty", 0, {}, started, reason)
+        return ("empty", _empty_df(), 0, {}, reason)
 
     try:
         raw_rows = parse_rows(text, feed.parse)
-    except Exception:  # noqa: BLE001
-        return ("partial", _empty_df(), 0)
+    except Exception as exc:  # noqa: BLE001
+        reason = f"parse error: {type(exc).__name__}: {exc}"
+        logger.warning("source %s feed %s parse failed: %s", source.id, feed.fixture_key(), exc)
+        _log_feed(source, feed, "failed", 0, {}, started, reason)
+        return ("failed", _empty_df(), 0, {}, reason)
 
     ctx = OpContext(source_id=f"{source.id}:{feed.fixture_key()}", run_time=run_time)
 
@@ -216,18 +283,52 @@ def _run_feed(
                     built.append(_with_extras(rec, row))
 
     df = _df_from_rows(built)
-    status: SourceStatus = "partial" if partial else "ok"
-    return (status, df, len(cleaned))
+    types = dict(Counter(str(row["type"]) for row in built))
+    feed_reason: str | None
+    if df.is_empty():
+        status: SourceStatus = "partial" if partial else "empty"
+        feed_reason = "truncated fetch produced no rows" if partial else "no rows after parsing/cleaning"
+    else:
+        status = "partial" if partial else "ok"
+        feed_reason = "truncated fetch" if partial else None
+    _log_feed(source, feed, status, df.height, types, started, feed_reason)
+    return (status, df, len(cleaned), types, feed_reason)
+
+
+def _log_feed(
+    source: SourceConfig,
+    feed: FeedConfig,
+    status: SourceStatus,
+    rows: int,
+    types: dict[str, int],
+    started: float,
+    reason: str | None,
+) -> None:
+    logger.info(
+        "source=%s feed=%s status=%s rows=%d types=%s duration=%dms reason=%s",
+        source.id,
+        feed.fixture_key(),
+        status,
+        rows,
+        types,
+        int((time.monotonic() - started) * 1000),
+        reason or "-",
+    )
 
 
 def _route_by_type(rows: list[Row], source: SourceConfig, feed: FeedConfig) -> list[Row]:
-    """Type-routed feeds (OTX): classify each row by its type field value."""
+    """Type-routed feeds (OTX): classify each row by its type field value.
+
+    The raw label is looked up case-insensitively so canonical OTX labels such
+    as ``FileHash-MD5``, ``URL`` or ``URI`` match without a case-sensitive map.
+    """
     assert feed.value_field and feed.type_field
     allowed = set(feed.output_types)
+    type_map = {str(k).strip().lower(): v for k, v in feed.type_map.items()}
     out: list[Row] = []
     for row in rows:
         raw_type = row.get(feed.type_field)
-        mapped = feed.type_map.get(str(raw_type))
+        mapped = type_map.get(str(raw_type).strip().lower())
         if mapped is None or mapped not in allowed:
             continue
         value = row.get(feed.value_field)

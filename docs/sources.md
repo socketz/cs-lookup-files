@@ -17,6 +17,7 @@ Each source declares which IOC types it produces (`output_types`):
 | `md5`      | MD5 file hash (32 hex)                  |
 | `sha256`   | SHA256 file hash (64 hex)               |
 | `email`    | Email address                           |
+| `asn`      | Autonomous System number (`60971`)      |
 
 Two mapping styles are supported per source:
 
@@ -24,7 +25,11 @@ Two mapping styles are supported per source:
    `fields: {ip: line, network: ip_or_cidr}`).
 2. **Type routing** — feeds that classify each row by a `type`/`value` pair
    (e.g. the OTX export) use `type_field`, `value_field` and a `type_map` that
-   translates raw labels (`IPv4`, `domain`, `filehash-md5`, ...) to types.
+   translates raw labels (`IPv4`, `domain`, `FileHash-MD5`, ...) to types. The
+   lookup is **case-insensitive**, so canonical OTX labels (`URL`, `URI`,
+   `FileHash-SHA256`) and lower-case variants both match.
+
+`asn` is an authoritative type: it is never enriched or derived from IPs.
 
 The schema of `config/sources.yaml` is available at
 `config/sources.schema.json` (regenerate: `cs-lookup-files schema`).
@@ -38,6 +43,7 @@ The schema of `config/sources.yaml` is available at
 | `cidr_lines`    | Spamhaus style: `<cidr> ; <label>` lines.                              |
 | `csv` / `tsv`   | Delimited rows; optional header; index or name-keyed field mapping.    |
 | `json`          | JSON payload; `records` path walks to the array (`data.list`).         |
+| `jsonl`         | Newline-delimited JSON: one object per line; blank/malformed skipped.  |
 
 Every parser exposes each value under **both** its name and its positional
 index, so config can reference columns by position even when a header exists
@@ -59,6 +65,16 @@ index, so config can reference columns by position even when a header exists
 - Format: `cidr_lines`, comment prefix `;`. Lines are `CIDR ; SBLxxxxx`.
 - Output: networks only.
 
+### Spamhaus ASN-DROP (`spamhaus_asndrop`)
+- URL: `https://www.spamhaus.org/drop/asndrop.json`
+- Format: **JSONL** — one object per line (`asn`, `rir`, `domain`, `cc`,
+  `asname`) plus a trailing `{"type": "metadata", ...}` line. The metadata line
+  has no `asn` field and is dropped by the field mapping.
+- Output: `asn`, with `asn_name` from `asname` and `country` from `cc`.
+- This is the **only** source of the `malicious_asns` dataset. ASNs are never
+  derived from flagged IPs, so a single bad IP cannot mark a whole provider as
+  malicious. `malicious_asns` is, by construction, the ASN-DROP list.
+
 ### Abuse.ch Feodo Tracker (`abusech_feodo`)
 - URL: `ipblocklist_recommended.txt`
 - Format: `plain_lines`, comment prefix `#` (header + `#`-prefixed banner), then
@@ -73,6 +89,13 @@ index, so config can reference columns by position even when a header exists
 - Clean op: `field_ge` on `abuseConfidenceScore >= 90`.
 - **Policy:** blacklist export only — no per-IP `check` calls, no reliance on
   elevated API quotas.
+- **Free-tier safeguards:** the body is cached on disk for `cache_ttl_hours: 24`
+  (freshness read from the embedded `fetched_at`), and a persisted
+  `max_requests_per_day: 5` quota prevents more than 5 blacklist calls per UTC
+  day across runs. `retries: 0` keeps a failed call from bursting the quota.
+  When the quota is exhausted the feed is reported `skipped` (reason
+  `rate limit`), never `failed`. The CI workflow persists `cache/` via
+  `actions/cache` so 6-hourly runs normally make one call per day.
 
 ### AlienVault OTX (`alienvault_otx`)
 - URL: `https://otx.alienvault.com/api/v1/indicators/export`
@@ -80,10 +103,15 @@ index, so config can reference columns by position even when a header exists
   `requests_per_minute`.
 - Format: per-line CSV-ish stream: `"type","indicator","pulse_name",...`
   (e.g. `"IPv4","1.2.3.4",...`). Classified by **type routing**:
-  `type_field`/`value_field`/`type_map` map `IPv4` → `ip`, `domain`/`hostname`
-  → `domain`, `url` → `url`, `filehash-md5` → `md5`, `filehash-sha256` →
-  `sha256`, `email` → `email`. Rows whose type maps to nothing are dropped.
-- Output: the declared `output_types` (currently ip/domain/url/md5/sha256/email).
+  `type_field`/`value_field`/`type_map` map the canonical OTX labels
+  `IPv4`/`IPv6` → `ip`, `domain`/`hostname` → `domain`, `URL`/`URI` → `url`,
+  `FileHash-MD5` → `md5`, `FileHash-SHA256` → `sha256`, `email` → `email`,
+  `CIDR` → `network`. Routing is case-insensitive; rows whose type maps to
+  nothing are dropped.
+- Output: the declared `output_types` (ip/network/domain/url/md5/sha256/email).
+- Note: the type map previously used lower-case `filehash-md5` labels, which
+  never matched OTX's canonical `FileHash-MD5`/`FileHash-SHA256`; hashes and
+  emails exported empty until this was corrected.
 - Categories default to `malware` (canonical vocabulary; see below).
 - Pagination is bounded by `max_seconds` (wall-clock budget) so a slow/throttled
   OTX truncates gracefully instead of blocking the pipeline SLA; a mid-pagination
@@ -115,6 +143,28 @@ high-churn sets above for finer scoring control; the DShield top-attackers set
   (e.g. `mastodon`, `openresolver`, `tldns`) are filtered out. Categories are
   derived from the label via `categories.field`/`mapping`.
 - No authentication required; polite `requests_per_minute: 20`.
+
+### alphaMountain (`alphamountain`)
+Two CSVs from [alphaMountain](https://www.alphamountain.ai/), both cached for
+24 hours:
+
+| Feed | URL | Role | Output |
+|------|-----|------|--------|
+| `alphamountain_top1m` | `alphaMountain-top1M.csv` | `allowlist` | domain |
+| `alphamountain_threat` | `alphaMountain-community-threat-1000.csv` | `intel` | domain |
+
+- Both are header CSVs (`rank,hostname` and `hostname,risk_score,more_info`).
+- The threat feed contributes scored domains under the `alphamountain` origin
+  (weight 80, category `malware`).
+- The top1M feed is **not scored or exported**. Its domains are a suppression
+  set: any `domain` or `url` indicator whose host matches an allowlisted
+  hostname is discarded from every dataset. This implements "legitimate but
+  compromised" handling — the site is suppressed, not merely down-weighted.
+  Matching is exact and also covers the `www.` variant (`example.com` matches
+  `www.example.com`); URL rows are matched by hostname.
+- Suppression runs both on the freshly collected frame and on state carried
+  over from previous runs, so an allowlisted domain cannot reappear from
+  `state.json`.
 
 ### ThreatFeeds.io additions (Status 200)
 

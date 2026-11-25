@@ -1,0 +1,4 @@
+hostname,risk_score,more_info
+legit.example.com,9.33,https://threatyeti.com/search?q=legit.example.com
+www.legit.example.com,9.19,https://threatyeti.com/search?q=www.legit.example.com
+malicious.example.com,9.21,https://threatyeti.com/search?q=malicious.example.com

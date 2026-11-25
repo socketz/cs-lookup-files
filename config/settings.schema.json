@@ -136,6 +136,13 @@
           "default": 0,
           "title": "Min Confidence",
           "type": "integer"
+        },
+        "min_confidence_by_type": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Min Confidence By Type",
+          "type": "object"
         }
       },
       "title": "ScoringSettings",

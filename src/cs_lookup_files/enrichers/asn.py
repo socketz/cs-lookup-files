@@ -244,15 +244,18 @@ def _drop_asn_cols(df: pl.DataFrame) -> pl.DataFrame:
 def enrich_frame(df: pl.DataFrame, tables: AsnTables) -> pl.DataFrame:
     """Enrich ASN data for the ip/network rows of a unified indicator frame.
 
-    Non-IP/network rows get null ASN columns. Each type partition is enriched
-    independently and re-concatenated after normalizing to a common schema.
+    Non-IP/network rows get null ASN columns. Authoritative ``asn`` rows already
+    carry their own ``asn``/``asn_name``/``country`` values and are passed
+    through untouched. Each type partition is enriched independently and
+    re-concatenated after normalizing to a common schema.
     """
     if df.is_empty():
         return _with_asn_columns(df)
 
     ip_rows = df.filter(pl.col("type") == "ip")
     net_rows = df.filter(pl.col("type") == "network")
-    other_rows = df.filter(~pl.col("type").is_in(["ip", "network"]))
+    asn_rows = df.filter(pl.col("type") == "asn")
+    other_rows = df.filter(~pl.col("type").is_in(["ip", "network", "asn"]))
 
     parts: list[pl.DataFrame] = []
     enriched_ips = enrich_ips(ip_rows, tables) if not ip_rows.is_empty() else _with_asn_columns(ip_rows)
@@ -262,6 +265,9 @@ def enrich_frame(df: pl.DataFrame, tables: AsnTables) -> pl.DataFrame:
         enriched_nets = _with_asn_columns(net_rows)
     parts.append(enriched_ips)
     parts.append(enriched_nets)
+    # Do not overwrite the authoritative ASN extras with nulls.
+    if not asn_rows.is_empty():
+        parts.append(asn_rows)
     if not other_rows.is_empty():
         parts.append(_with_asn_columns(other_rows))
 

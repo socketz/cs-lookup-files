@@ -20,6 +20,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Comfortable margin over the <30 min objective and far from the 6h job cap.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -43,6 +45,20 @@ jobs:
       - name: Test
         run: uv run pytest tests -q
 
+      - name: Compute cache key
+        id: cachekey
+        # Per-day key: keeps the cache store bounded (Free tier: 10 GB/repo)
+        # instead of creating one entry per run. restore-keys picks the newest.
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore HTTP + ip2asn cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: cache
+          key: lookups-cache-${{ runner.os }}-${{ steps.cachekey.outputs.date }}
+          restore-keys: |
+            lookups-cache-${{ runner.os }}-
+
       - name: Fetch previous state
         # Missing state (first run) is tolerated: the source is published with
         # empty history and a 404 is expected.
@@ -61,27 +77,36 @@ jobs:
             --state state/state.json \
             --cache-dir cache
 
+      - name: Verify build produced lookup datasets
+        # Empty datasets are omitted from the release, so a run where every
+        # dataset is pruned would still upload metadata/state. Publishing that
+        # would replace the stable `latest` URLs with 404s; fail the build so
+        # publish-release never runs.
+        run: |
+          python3 - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          meta = json.loads(Path("output/metadata.json").read_text())
+          total = sum(int(v) for v in meta.get("ioc_counts", {}).values())
+          datasets = sorted(p.name for p in Path("output").glob("malicious_*.csv"))
+          if total <= 0 or not datasets:
+              print("::error::build produced no lookup datasets; refusing to publish")
+              sys.exit(1)
+          print(f"datasets={len(datasets)} indicators={total}")
+          PY
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7.0.2
         with:
           name: lookup-files
+          # Globs (not an explicit list): datasets with zero rows are omitted
+          # from the release so files may legitimately be absent.
           path: |
-            output/malicious_ips.csv
-            output/malicious_ips.json
-            output/malicious_networks.csv
-            output/malicious_networks.json
-            output/malicious_asns.csv
-            output/malicious_asns.json
-            output/malicious_domains.csv
-            output/malicious_domains.json
-            output/malicious_urls.csv
-            output/malicious_urls.json
-            output/malicious_md5.csv
-            output/malicious_md5.json
-            output/malicious_sha256.csv
-            output/malicious_sha256.json
-            output/malicious_emails.csv
-            output/malicious_emails.json
-            output/metadata.json
-            output/state.json
-          retention-days: 30
+            output/*.csv
+            output/*.json
+          if-no-files-found: error
+          # The publish job downloads immediately; 1 day keeps the Free
+          # tier artifact budget (500 MB) far below the limit.
+          retention-days: 1

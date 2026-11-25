@@ -11,18 +11,44 @@ scoring:
   persistence_bonus_max: 5.0
   persistence_half_life_days: 60.0
   # A single-source indicator can never exceed this unless its source id has a
-  # dedicated cap below.
+  # dedicated cap below. Only authoritative ASN/network lists (Spamhaus) are
+  # allowed above the 70 default so they survive min_confidence.
   default_single_source_score: 70
   max_single_source_score:
+    # Caps are keyed by SOURCE (origin) id, not feed id. FireHOL's weak
+    # per-category feeds share the `firehol` origin and its 85 weight, so they
+    # already land at the default 70 single-source cap.
+    # Spamhaus DROP and ASN-DROP are authoritative, single-origin lists; a
+    # fresh row must clear the 75 precision floor.
+    spamhaus: 90
     alienvault_otx: 55
+    # Weak single-signal feeds stay below the 75 export threshold on their own.
+    cins: 50
+    jamesbrine: 45
+    dshield: 50
+    ipsum: 55
+    linuxtracker: 55
+    bbcan177: 50
+    joewein: 45
+    minerchk: 50
+    nocoin: 45
+    disconnect: 45
   # Fresh multi-source confirmations land in the documented bands:
   # 1 source -> 40-70, 2 sources -> 75-90, 3+ sources -> 90-100.
   source_count_caps:
     1: 70
     2: 90
     3: 100
-  # Rows below this confidence are excluded from the output.
-  min_confidence: 0
+  # Precision floor for the export. Rows below this are not published: a
+  # single non-authoritative source (cap 70) or OTX-only rows (cap 55) are
+  # dropped, so consumers only see corroborated or authoritative indicators.
+  min_confidence: 75
+  # Optional per-IOC-type floors. Emails are only reported by OTX (single-source
+  # cap 55), so without an override the whole dataset would be pruned. This
+  # keeps the strict global floor for corroborated types while allowing the
+  # email dataset to publish.
+  min_confidence_by_type:
+    email: 55
 
 asn:
   ipv4_url: https://iptoasn.com/data/ip2asn-v4.tsv.gz
@@ -61,9 +87,11 @@ output:
     - asn_name
     - country
     - confidence_score
-    - malicious_ip_count
     - source_count
     - sources
+    - categories
+    - first_seen
+    - last_seen
   domain_columns:
     - domain
     - confidence_score

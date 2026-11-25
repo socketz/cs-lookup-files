@@ -1,7 +1,19 @@
 # CrowdStrike Falcon Integration
 
-The published lookup files are designed to be consumed by Falcon LogScale,
-correlation rules and Fusion SOAR with no transformation. Stable URLs:
+## Scope: read-only context for hunting and investigation
+
+These lookup files are **read-only context** for Threat Hunting,
+investigation, enrichment, LogScale and Fusion SOAR. Importing them does **not**
+modify, create, or delete CrowdStrike IOCs, does not enroll indicators in IOC
+Management, and does not trigger blocking or automated response. Nothing in this
+project calls the Falcon IOC APIs; it only publishes release artifacts.
+
+The intended use is: enrich events, join a lookup, filter by `confidence_score`,
+and let a human (or a deliberately separate automation) decide what to do.
+Use the files as a source of *additional context*, never as the authoritative
+IOC store.
+
+Stable URLs:
 
 ```
 https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_ips.csv
@@ -16,11 +28,25 @@ https://github.com/socketz/cs-lookup-files/releases/latest/download/metadata.jso
 https://github.com/socketz/cs-lookup-files/releases/latest/download/state.json
 ```
 
-## Falcon LogScale: scheduled scheduled import
+`latest/download` is just distribution. Pin a `YYYY.MM.DD.HHMM` tag when you need
+a reproducible snapshot for an investigation.
 
-Use a **Scheduled Search -> CSV ingest** (or a **File Upload by URL**) pointed at
-`malicious_ips.csv`. The CSV has a header identical to the intended schema, so
-ingest is direct.
+Datasets with zero rows are **not written**. A missing file means "no qualifying
+indicators this run", not a broken release; consumers must tolerate absence
+(e.g. keep the previous lookup when the download 404s). `metadata.json` lists
+`ioc_counts` (0 for absent datasets) and `empty_datasets`, so automation can
+distinguish "empty" from "missing".
+
+## The export is already filtered
+
+`config/settings.yaml` sets `min_confidence: 75`, so every exported row is
+already at or above 75. Apply a **higher** threshold for hunting focus or
+automation; never assume a lower one will discard much.
+
+## Falcon LogScale: import as a lookup
+
+Use a **Scheduled Search -> CSV ingest** (or **File Upload by URL**) pointed at
+the CSV. The header matches the schema, so ingest is direct.
 
 Example ingest mapping (LogScale):
 
@@ -35,32 +61,63 @@ Example ingest mapping (LogScale):
 | `first_seen`      | `malicious.first_seen` |
 | `last_seen`       | `malicious.last_seen` |
 
-After ingest:
+### Hunting: join + threshold (primary use)
 
 ```
-| malicious(lookup=malicious_ips) | table(remote_ip, confidence_score, sources)
+// Enrich outbound connections and surface the highest-confidence matches.
+event_simpleName=NetworkConnectIP4
+| lookup malicious_ips ipField=RemoteAddressIP4 output=confidence_score, sources, categories, asn, asn_name
+| RemoteAddressIP4 IS NOT NULL
+| confidence_score >= 75
+| table(timestamp, ComputerName, RemoteAddressIP4, confidence_score, sources, categories, asn, asn_name)
 ```
 
-### Real-time lookup (Falcon Query Language)
+Raise the bar for triage queues that should be very precise:
 
-Ingest the file once as a lookup (`malicious_ips`). Then match on the fly:
-
-```fql
-// Match a remote IP address
-event_simpleName=NetworkListenProcess
-| lookup malicious_ips ipField=RemoteAddressIPv4 output=confidence_score, sources, categories
-| RemoteAddressIPv4 IS NOT NULL
-
-// Zone-scoped: only flag non-private remote IPs
-| test(RemoteAddressIPv4)
-| !cidrmatch("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", RemoteAddressIPv4)
-| lookup malicious_ips ipField=RemoteAddressIPv4
+```
+| lookup malicious_ips ipField=RemoteAddressIP4 output=confidence_score, sources
+| confidence_score >= 90
 ```
 
-## Fusion SOAR: HTTP / Webhook import
+### Hunting: private-IP hygiene
 
-Point a SOAR workflow at the stable URL. Example (JSON body shown; CSV works the
-same via file download):
+```
+| !cidrmatch("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16", RemoteAddressIP4)
+| lookup malicious_ips ipField=RemoteAddressIP4 output=confidence_score, sources
+```
+
+### Hunting: CIDR ranges
+
+Load `malicious_networks.csv` and match destinations:
+
+```
+| !cidrmatch("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16", DestinationIP)
+| lookup malicious_networks networkField=DestinationIP output=confidence_score, network, asn, asn_name
+| confidence_score >= 75
+| table(timestamp, ComputerName, DestinationIP, network, confidence_score, asn, asn_name)
+```
+
+### Hunting: ASN context vs authoritative ASN blocklist
+
+`malicious_asns` is the authoritative Spamhaus ASN-DROP list (ASN-level
+reputation). It is **not** derived from flagged IPs, so a hit is meaningful:
+
+```
+| DestinationIP IS NOT NULL
+| lookup malicious_asns asnField=DestinationASN output=asn_name, confidence_score, sources
+| confidence_score >= 75
+| table(timestamp, ComputerName, DestinationASN, asn_name, confidence_score, sources)
+```
+
+To investigate an IP whose ASN looks interesting, use the **context** columns on
+`malicious_ips`/`malicious_networks` (`asn`, `asn_name`, `country`). Those
+columns describe the network owner; they do not assert that the ASN is
+malicious. Cross-reference `malicious_asns` before drawing that conclusion.
+
+## Fusion SOAR: pull and enrich (not IOC import)
+
+Point a workflow at the stable URL and insert rows into a LogScale lookup or use
+them for enrichment steps. Do **not** feed these rows into IOC Management.
 
 ```json
 {
@@ -68,37 +125,26 @@ same via file download):
   "format": "csv",
   "target_lookup": "malicious_ips",
   "schedule": "*/6 * * * *",
-  "on_failure": "alert"
+  "on_failure": "alert",
+  "note": "read-only hunting context; does not modify Falcon IOCs"
 }
 ```
 
 Fusion SOAR can `HTTP -> Fetch Media` then `Record Insert` into a LogScale
 lookup, gated on `metadata.json`'s `version` to avoid redundant re-imports.
 
-## Correlation Rules
+## Non-goals
 
-Load `malicious_networks.csv` and use CIDR matching in a rule:
+No blocking, no automated containment, and no IOC enrollment are implemented by
+this project. Any response action is out of scope and must be built separately,
+with its own review and approval path. Raising the lookup threshold to `90` in
+that separate automation is recommended if it ever exists.
 
-```
-| !cidrmatch("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16", DestinationIP)
-| lookup malicious_networks networkField=DestinationIP output=confidence_score, network
-| confidence_score > 75
-| alert("High-confidence egress to malicious network")
-```
+## Refresh notes
 
-## ASN-level hunting
-
-```
-| DestinationIP IS NOT NULL
-| lookup malicious_asns asnField=DestinationASN output=malicious_ip_count, sources
-| malicious_ip_count >= 1
-```
-
-## Scheduled enrichment notes
-
-- SIP multi-value (`ip`, `asn`, `asn_name`, `country`, `confidence_score`)
-  columns are emitted as `;`-delimited strings matching the CSV sample in
-  `README.md` — safe for LogScale string matching.
-- `first_seen`/`last_seen` use ISO-8601 UTC, accepted by LogScale energy.
-- Prefer `latest/download` for long-lived automations; pin a specific
-  `YYYY.MM.DD.HHMM` asset for audit if you must reproduce an exact snapshot.
+- `sources`, `categories` are `;`-delimited strings; `first_seen`/`last_seen`
+  are ISO-8601 UTC.
+- Prefer `latest/download` for long-lived automations; pin an exact
+  `YYYY.MM.DD.HHMM` asset for audit reproduction.
+- Importing an empty file can overwrite a lookup with nothing, which is why the
+  pipeline omits empty datasets and reports them in `metadata.json`.
