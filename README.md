@@ -86,16 +86,16 @@ GitHub Actions runs the pipeline every 6 hours and publishes a versioned GitHub
 Release. Consumers use the stable URLs:
 
 ```
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_ips.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_networks.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_asns.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_domains.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_urls.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_md5.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_sha256.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/malicious_emails.csv
-https://github.com/<org>/cs-lookup-files/releases/latest/download/metadata.json
-https://github.com/<org>/cs-lookup-files/releases/latest/download/state.json
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_ips.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_networks.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_asns.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_domains.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_urls.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_md5.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_sha256.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_emails.csv
+https://github.com/socketz/cs-lookup-files/releases/latest/download/metadata.json
+https://github.com/socketz/cs-lookup-files/releases/latest/download/state.json
 ```
 
 `state.json` carries observation history so indicators persist across runs and
