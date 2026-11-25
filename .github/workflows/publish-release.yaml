@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: lookup-files
           path: artifacts
@@ -41,7 +41,7 @@ jobs:
           echo "Found version: $VERSION"
 
       - name: Create release
-        uses: softprops/action-gh-release@v3.0.4
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}
@@ -49,9 +49,18 @@ jobs:
             Automated lookup-file build for ${{ steps.version.outputs.version }}.
 
             Consumers should use the stable `latest` URLs:
-            - https://github.com/${{ github.repository }}/releases/latest/download/malicious_ips.csv
-            - https://github.com/${{ github.repository }}/releases/latest/download/malicious_networks.csv
-            - https://github.com/${{ github.repository }}/releases/latest/download/malicious_asns.csv
-            - https://github.com/${{ github.repository }}/releases/latest/download/metadata.json
-            - https://github.com/${{ github.repository }}/releases/latest/download/state.json
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_asns.csv
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_asns.json
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_domains.csv
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_domains.json
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_emails.csv
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_emails.json
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_ips.csv
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_ips.json
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_networks.csv
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_networks.json
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_urls.csv
+              - https://github.com/${{ github.repository }}/releases/latest/download/malicious_urls.json
+              - https://github.com/${{ github.repository }}/releases/latest/download/metadata.json
+              - https://github.com/${{ github.repository }}/releases/latest/download/state.json
           files: artifacts/*
