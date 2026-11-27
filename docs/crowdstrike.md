@@ -96,10 +96,16 @@ Raise the bar for triage queues that should be very precise:
 Load `malicious_networks.csv` and match destinations:
 
 ```
-| !cidrmatch("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16", DestinationIP)
-| lookup malicious_networks networkField=DestinationIP output=confidence_score, network, asn, asn_name
+#event_simpleName="NetworkConnectIP4"
+| RemoteAddressIP4=~match("malicious_networks.csv", mode="cidr", column="network")
+| case {
+  ConnectionDirection=0 | ConnectionDirection:="OUT";
+  ConnectionDirection=1 | ConnectionDirection:="IN";
+}
+| ioc:lookup(field=[RemoteAddressIP4], type="ip_address", confidenceThreshold=low)
+| groupBy([ComputerName, ContextBaseFileName, ContextImageFileName, LocalAddressIP4, LocalPort, ConnectionDirection,  RemoteAddressIP4, RemotePort, ioc.detected, asn, asn_names, confidence_score, sources, categories], limit=max)
 | confidence_score >= 75
-| table(timestamp, ComputerName, DestinationIP, network, confidence_score, asn, asn_name)
+| sort([ioc.detected, confidence_score], order=[DESC, DESC], limit=max)
 ```
 
 ### Hunting: ASN context vs authoritative ASN blocklist
