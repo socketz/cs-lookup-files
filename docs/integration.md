@@ -40,15 +40,15 @@ Upload both lookup families, then enrich events twice:
 
 ```logscale
 // 1) Is the remote IP a known malicious indicator?
-event_simpleName=NetworkConnectIP4
-| lookup malicious_ips ipField=RemoteAddressIP4
-    output=confidence_score, sources, categories, asn, asn_name
+#event_simpleName=NetworkConnectIP4
+| match(file="malicious_ips.csv", field=RemoteAddressIP4, column="ip",
+        include=[confidence_score, sources, categories, asn, asn_name])
 // 2) What is the network used for? (cidr mode; returns use/source)
 | match(file="ip_classified_networks.csv", field=RemoteAddressIP4,
         column="network", mode=cidr, include=["use","source"], ignoreCase=true)
 | confidence_score >= 75
-| table(timestamp, ComputerName, RemoteAddressIP4, confidence_score,
-        categories, asn, asn_name, use, source)
+| table([@timestamp, ComputerName, RemoteAddressIP4, confidence_score,
+        categories, asn, asn_name, use, source])
 ```
 
 Use `use` as **triage context**, not as a second malicious verdict:

@@ -68,27 +68,26 @@ Example ingest mapping (LogScale):
 
 ### Hunting: join + threshold (primary use)
 
-```
+```logscale
 // Enrich outbound connections and surface the highest-confidence matches.
-event_simpleName=NetworkConnectIP4
-| lookup malicious_ips ipField=RemoteAddressIP4 output=confidence_score, sources, categories, asn, asn_name
-| RemoteAddressIP4 IS NOT NULL
+#event_simpleName=NetworkConnectIP4
+| match(file="malicious_ips.csv", field=RemoteAddressIP4, column=ip, include=[confidence_score, sources, categories, asn, asn_name])
 | confidence_score >= 75
-| table(timestamp, ComputerName, RemoteAddressIP4, confidence_score, sources, categories, asn, asn_name)
+| table([@timestamp, ComputerName, RemoteAddressIP4, confidence_score, sources, categories, asn, asn_name])
 ```
 
 Raise the bar for triage queues that should be very precise:
 
-```
-| lookup malicious_ips ipField=RemoteAddressIP4 output=confidence_score, sources
+```logscale
+| match(file="malicious_ips.csv", field=RemoteAddressIP4, column=ip, include=[confidence_score, sources])
 | confidence_score >= 90
 ```
 
 ### Hunting: private-IP hygiene
 
-```
-| !cidrmatch("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16", RemoteAddressIP4)
-| lookup malicious_ips ipField=RemoteAddressIP4 output=confidence_score, sources
+```logscale
+| !cidr(RemoteAddressIP4, subnet=["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"])
+| match(file="malicious_ips.csv", field=RemoteAddressIP4, column=ip, include=[confidence_score, sources])
 ```
 
 ### Hunting: CIDR ranges
@@ -103,21 +102,24 @@ Load `malicious_networks.csv` and match destinations:
   ConnectionDirection=1 | ConnectionDirection:="IN";
 }
 | ioc:lookup(field=[RemoteAddressIP4], type="ip_address", confidenceThreshold=low)
-| groupBy([ComputerName, ContextBaseFileName, ContextImageFileName, LocalAddressIP4, LocalPort, ConnectionDirection,  RemoteAddressIP4, RemotePort, ioc.detected, asn, asn_names, confidence_score, sources, categories], limit=max)
+| groupBy([ComputerName, ContextBaseFileName, ContextImageFileName, LocalAddressIP4, LocalPort, ConnectionDirection,  RemoteAddressIP4, RemotePort, ioc.detected, asn, asn_name, confidence_score, sources, categories], limit=max)
 | confidence_score >= 75
 | sort([ioc.detected, confidence_score], order=[DESC, DESC], limit=max)
 ```
+
+`ioc:lookup()` enriches events from CrowdStrike's curated IOC database; it is
+separate from `malicious_networks.csv` and does not read the release datasets.
 
 ### Hunting: ASN context vs authoritative ASN blocklist
 
 `malicious_asns` is the authoritative Spamhaus ASN-DROP list (ASN-level
 reputation). It is **not** derived from flagged IPs, so a hit is meaningful:
 
-```
-| DestinationIP IS NOT NULL
-| lookup malicious_asns asnField=DestinationASN output=asn_name, confidence_score, sources
+```logscale
+#event_simpleName=NetworkConnectIP4
+| match(file="malicious_asns.csv", field=DestinationASN, column=asn, include=[asn_name, confidence_score, sources])
 | confidence_score >= 75
-| table(timestamp, ComputerName, DestinationASN, asn_name, confidence_score, sources)
+| table([@timestamp, ComputerName, DestinationASN, asn_name, confidence_score, sources])
 ```
 
 To investigate an IP whose ASN looks interesting, use the **context** columns on
