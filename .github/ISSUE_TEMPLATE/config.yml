@@ -13,3 +13,9 @@ contact_links:
   - name: Confidence scoring
     url: https://github.com/socketz/cs-lookup-files/blob/master/docs/scoring.md
     about: How the 0-100 confidence score is computed and decays.
+  - name: Integration with adjacent lookup projects
+    url: https://github.com/socketz/cs-lookup-files/blob/master/docs/integration.md
+    about: Composing these lookups with logscale-lookup-files and downstream tooling.
+  - name: Roadmap and status
+    url: https://github.com/socketz/cs-lookup-files/blob/master/docs/roadmap.md
+    about: What is shipped, what is pending, and how the projects compose.

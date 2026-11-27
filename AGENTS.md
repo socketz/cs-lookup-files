@@ -35,6 +35,20 @@ The primary goal is to provide operationally valuable lookup files for:
 
 ---
 
+# Related Projects
+
+- **`socketz/logscale-lookup-files`** publishes LogScale lookups for malicious
+  packages and IP usage classification (`malicious`/`tor`/`vpn`/`datacenter`).
+  It is complementary, not a duplicate: `cs-lookup-files` owns multi-type IOC
+  scoring and authoritative ASN-DROP, while `logscale-lookup-files` owns package
+  coverage and network classification. Overlapping blocklists must not be counted
+  as independent confirmations. See `docs/integration.md`.
+- **`falcon-hunting-toolkit`** is a downstream consumer that can gate imports on
+  `metadata.json` and generate hunts/enrichments from both lookup families. It
+  must preserve the read-only contract (no IOC Management, blocking or response).
+
+---
+
 # Design Principles
 
 ## Keep It Simple
@@ -195,11 +209,11 @@ New sources are added as **config-only** entries with zero core-logic changes;
 the roadmap in `docs/roadmap.md` phases their rollout by IOC type and
 auth/format requirements.
 
-When adding a source, set two tunables per feed:
+When adding an origin, set two tunables at origin level:
 
 - `weight` — global source-reliability weight (0..100).
 - `ioc_weights` — optional per-IOC-type weight (0..100) keyed by indicator type
-  (ip/network/domain/url/md5/sha256/email), reflecting the feed's reliability
+  (ip/network/domain/url/md5/sha256/email), reflecting the origin's reliability
   for that *specific* IOC type. Falls back to `weight`.
 
 No modifications to core logic should be required when adding new sources.
@@ -352,14 +366,17 @@ latest/
 ├── malicious_emails.csv
 ├── malicious_emails.json
 │
-└── metadata.json
+├── metadata.json
+└── state.json
 ```
 
 ---
 
 # Versioning Strategy
 
-Maintain versioned snapshots.
+Maintain versioned snapshots. Distribution uses GitHub Releases tagged
+`YYYY.MM.DD.HHMM`; `latest` is the GitHub "latest" release. The tree below is the
+conceptual layout.
 
 Example:
 
@@ -399,17 +416,22 @@ Example:
   "version": "2026.11.23.1200",
   "generated_at": "2026-11-23T12:00:00Z",
   "sources": [
-    "firehol_level1",
-    "spamhaus_drop",
-    "abusech_feodo",
+    "firehol",
+    "spamhaus",
+    "abusech",
     "alienvault_otx",
     "abuseipdb",
-    "dshield_intelfeed"
+    "dshield"
   ],
   "source_status": {
-    "firehol_level1": "ok",
-    "spamhaus_drop": "ok",
+    "firehol": "ok",
+    "spamhaus": "ok",
     "alienvault_otx": "skipped"
+  },
+  "source_feeds": {
+    "firehol": [
+      {"feed": "firehol_level1", "status": "ok", "rows": 1234, "types": {"ip": 1200, "network": 34}, "reason": null}
+    ]
   },
   "ioc_counts": {
     "malicious_ips": 125000,
@@ -420,7 +442,8 @@ Example:
     "malicious_md5": 300,
     "malicious_sha256": 500,
     "malicious_emails": 120
-  }
+  },
+  "empty_datasets": []
 }
 ```
 
@@ -448,6 +471,9 @@ Suggested baseline weights:
 | AbuseIPDB | 80 |
 | AlienVault OTX | 70 |
 
+The full shipped table (23 origins, per-origin `ioc_weights` and single-source
+caps) is maintained in `docs/scoring.md` and `config/settings.yaml`.
+
 Every source also accepts an optional `ioc_weights` map so its reliability can
 be tuned **per IOC type** (ip/network/domain/url/md5/sha256/email). For a given
 row, the effective weight used in scoring is
@@ -463,17 +489,21 @@ Scoring Requirements:
 - One low-confidence source must never generate a very high score.
 - The formula must be fully documented.
 
-Examples:
+Examples (band maxima; actual score depends on weights and recency):
 
-- Single source → 40-70
-- Two trusted sources → 75-90
-- Three or more trusted sources → 90-100
+- Single source → capped by `max_single_source_score` (default 70; `spamhaus` 90;
+  OTX 55; other explicit caps 45–55)
+- Two sources → at most 90
+- Three or more sources → at most 100
 
 **Export precision floor:** `min_confidence: 75` is applied at export, so single
-non-authoritative sources (cap 70) and OTX-only rows (cap 55) are not published;
-`spamhaus` carries a single-source cap of 90 so DROP/ASN-DROP rows survive.
-Corroborated rows use the 2/3+ bands. Datasets that end up empty are omitted and
-reported in `metadata.json` rather than published as empty lookups.
+non-authoritative sources (default cap 70) and OTX-only
+ip/network/domain/url/md5/sha256 rows (cap 55) are not published; `spamhaus`
+carries a single-source cap of 90 so DROP/ASN-DROP rows survive. `email` uses
+`min_confidence_by_type.email: 55` because OTX is its only source today, so
+single-source emails remain publishable. Corroborated rows use the 2/3+ bands.
+Datasets that end up empty are omitted and reported in `metadata.json` rather
+than published as empty lookups.
 
 **Allowlist feeds** (`role: allowlist`, e.g. alphaMountain top1M) are never
 scored. Their hostnames are removed from the candidate set before scoring and
@@ -642,6 +672,9 @@ against the generated lookup files.
 - DShield intelfeed integration
 - FireHOL per-category IP sets
 - alphaMountain threat domains + top1M allowlist
+- Config-driven catalogue of 23 origins / 41 feeds (CINS, IPsum, C2IntelFeeds,
+  AlienVault reputation, TweetFeed, Botvrij, OpenPhish, PhishTank, viriback,
+  miner/adblock lists, etc.)
 - ASN enrichment
 - Deduplication
 - Confidence scoring (global + per-IOC-type weights)

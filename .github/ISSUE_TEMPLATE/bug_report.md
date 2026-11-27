@@ -16,6 +16,11 @@ export, CLI, or a published dataset)?
 - [ ] `malicious_ips`
 - [ ] `malicious_networks`
 - [ ] `malicious_asns`
+- [ ] `malicious_domains`
+- [ ] `malicious_urls`
+- [ ] `malicious_md5`
+- [ ] `malicious_sha256`
+- [ ] `malicious_emails`
 - [ ] `metadata.json` / `state.json`
 - [ ] Not dataset-specific (collection, cleaning, scoring, ASN enrichment, CLI, CI)
 
@@ -23,7 +28,8 @@ export, CLI, or a published dataset)?
 - Mode: `uv run cs-lookup-files build`, `collect` or `validate` / Docker image / GitHub Actions run
   (link the run if applicable):
 - Version or commit (release tags look like `YYYY.MM.DD.HHMM`):
-- Source id(s) from `config/sources.yaml` involved (e.g. `spamhaus_drop`):
+- Source/feed id(s) from `config/sources.yaml` involved (e.g. origin
+  `spamhaus`, feed `spamhaus_drop`):
 - Python version and OS:
 
 **Steps to reproduce**
@@ -37,7 +43,7 @@ Include the exact commands, flags (`--offline`, `--state`, `--version`, ...) and
 **Expected vs actual**
 What did you expect, and what happened? For data problems include row counts,
 score values, a CSV snippet, or an excerpt of `metadata.json` (`ioc_counts`,
-`source_status`).
+`source_status`, `source_feeds`, `empty_datasets`).
 
 **Does `--offline` reproduce it?**
 
@@ -53,8 +59,9 @@ paste relevant log output here
 
 Never paste `ABUSEIPDB_API_KEY` / `OTX_API_KEY` values, full request headers, or a
 complete `.env` file. A single failing source is expected to leave the rest of the
-run intact (the run only aborts when every source fails), so include the
-`source_status` map when reporting partial data.
+run intact; the run aborts only when no source is `ok` or `partial` (for example,
+every origin failed or was skipped), so include the `source_status` and
+`source_feeds` maps when reporting partial data.
 
 **Additional context**
 CSV rows and `metadata.json` excerpts are more useful than screenshots. Mention

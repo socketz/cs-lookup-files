@@ -16,8 +16,9 @@ modify or delete CrowdStrike IOCs, does not enroll indicators for blocking, and
 does not trigger automated response. Nothing in this project calls the Falcon
 IOC APIs; it only publishes release artifacts.
 
-Typical use: join a lookup to events, filter by `confidence_score` (the export is
-already `>= 75`), and investigate. Docs: [`docs/crowdstrike.md`](docs/crowdstrike.md).
+Typical use: join a lookup to events, filter by `confidence_score` (the global
+export floor is 75; `malicious_emails` uses a 55 per-type floor), and investigate.
+Docs: [`docs/crowdstrike.md`](docs/crowdstrike.md).
 
 ## Outputs
 
@@ -39,7 +40,8 @@ time-boxed by first/last observation. `malicious_asns` is **never** derived from
 flagged IPs: an ASN is listed only when an authoritative ASN-level list
 (Spamhaus ASN-DROP) names it, so a single bad IP cannot mark a whole provider.
 The export applies `min_confidence: 75`, so only corroborated or authoritative
-rows are published.
+rows are published; `malicious_emails` uses `min_confidence_by_type.email: 55`
+because OTX is its only source today.
 
 Datasets with zero rows are **not written**. A missing file means "no qualifying
 indicators this run"; `metadata.json` reports `ioc_counts` (0) and
@@ -53,7 +55,7 @@ integration examples.
 
 ```csv
 ip,asn,asn_name,country,confidence_score,source_count,sources,categories,first_seen,last_seen
-1.2.3.4,13335,CLOUDFLARENET,US,98,4,"spamhaus_drop;firehol;abusech_feodo;alienvault_otx",blocklist,2026-11-23T00:00:00Z,2026-11-23T12:00:00Z
+1.2.3.4,13335,CLOUDFLARENET,US,98,3,"abusech;alienvault_otx;spamhaus","blocklist;malware;malware_c2",2026-11-23T00:00:00Z,2026-11-23T12:00:00Z
 ```
 
 ## Quick start
@@ -99,11 +101,15 @@ https://github.com/socketz/cs-lookup-files/releases/latest/download/state.json
 ```
 
 `state.json` carries observation history so indicators persist across runs and
-confidence decays with age, not on every rebuild.
+confidence decays with age, not on every rebuild. It is a build-to-build artifact
+for the next workflow run (not a hunting lookup); with the current feed set it can
+be large, so consumers that only need the datasets should skip it.
 
 ## Configuration
 
-- `config/sources.yaml` — ETL for each feed (add a source by appending a block; no code changes).
+- `config/sources.yaml` — ETL for the 23 origins / 41 feeds currently enabled
+  (add a source by appending a block; no code changes). See
+  [`docs/sources.md`](docs/sources.md) for the full inventory.
 - `config/settings.yaml` — scoring thresholds, ip2asn endpoints, output columns.
 - `config/sources.schema.json` / `config/settings.schema.json` — JSON Schema
   describing the accepted config structure (regenerated via `cs-lookup-files schema`).
@@ -150,6 +156,7 @@ offline testing) — see `tests/integration/test_pipeline.py::test_config_only_n
 - [Confidence scoring](docs/scoring.md)
 - [Intelligence sources](docs/sources.md)
 - [CrowdStrike integration](docs/crowdstrike.md)
+- [Integration with adjacent lookup projects](docs/integration.md)
 - [Roadmap](docs/roadmap.md)
 
 ## License

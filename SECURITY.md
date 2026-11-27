@@ -33,14 +33,25 @@ by CrowdStrike Falcon. The following are treated as security-relevant:
   runtime cause the affected source to be **skipped**, not failed.
 - **Bogon filtering.** A global safety net removes private/reserved/documentation
   ranges even if a source config omits the relevant clean ops.
-- **Output validation.** Each dataset is validated by Pydantic schemas and the
-  test suite, and scores are bounded to 0–100.
+- **Allowlist suppression.** Feeds configured with `role: allowlist` (e.g.
+  alphaMountain top1M) are never scored or exported; their hostnames suppress
+  matching domain/URL indicators from the fresh frame and carried-over state.
+- **Output validation.** Config and metadata are validated by Pydantic models;
+  the test suite checks dataset shape, authoritative ASNs, empty-dataset
+  omission and score bounds (0–100).
+- **Build artifacts.** `cache/` (HTTP bodies, daily quota, ip2asn) and
+  `state.json` contain public indicator/build data, not secrets. `.env` and
+  `cache/` are gitignored; do not commit either.
 - **Dependency scanning.** Third-party dependencies are pinned via `uv.lock`;
   keep them current. GitHub Dependabot alerts are recommended to be enabled.
 - **Least privilege.** CI tokens use the minimum scopes required (`contents` for
   release creation, `actions: read` for artifact download).
+- **Release integrity.** Releases are distributed through GitHub Releases.
+  Per-file hashes/sizes and optional signing/provenance are tracked as P0 in
+  `docs/roadmap.md`; until they exist, pin a `YYYY.MM.DD.HHMM` release for audit
+  and verify it through GitHub.
 
 ## Supported versions
 
-Only the current default branch and the latest tagged `cs-lookup-files` package
-receive security fixes.
+Only the current default branch and the latest tagged release receive security
+fixes.

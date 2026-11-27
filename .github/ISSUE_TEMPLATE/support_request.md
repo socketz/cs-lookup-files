@@ -20,8 +20,10 @@ type: Task
 - Release version (`YYYY.MM.DD.HHMM`) or commit:
 - Run mode (CLI / Docker image tag / GitHub Actions run link):
 - OS, Python version (`uv --version`), and Docker version if applicable:
-- Dataset involved (`malicious_ips`, `malicious_networks`, `malicious_asns`) and
-  whether it is the CSV or JSON form:
+- Dataset(s) involved (`malicious_ips`, `malicious_networks`, `malicious_asns`,
+  `malicious_domains`, `malicious_urls`, `malicious_md5`, `malicious_sha256`,
+  `malicious_emails`, `metadata.json`, `state.json`) and whether it is the CSV or
+  JSON form:
 
 **What you tried**
 Describe the steps and include links to the docs you followed:
@@ -29,7 +31,8 @@ Describe the steps and include links to the docs you followed:
 [architecture](https://github.com/socketz/cs-lookup-files/blob/master/docs/architecture.md),
 [sources](https://github.com/socketz/cs-lookup-files/blob/master/docs/sources.md),
 [scoring](https://github.com/socketz/cs-lookup-files/blob/master/docs/scoring.md),
-[CrowdStrike integration](https://github.com/socketz/cs-lookup-files/blob/master/docs/crowdstrike.md).
+[CrowdStrike integration](https://github.com/socketz/cs-lookup-files/blob/master/docs/crowdstrike.md),
+[adjacent lookup integration](https://github.com/socketz/cs-lookup-files/blob/master/docs/integration.md).
 
 **Error / logs**
 

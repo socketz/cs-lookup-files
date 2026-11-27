@@ -1,164 +1,252 @@
-# Roadmap
+# Roadmap and Status
 
-The MVP ships a sustainable, automated pipeline. This page tracks the direction
-of the project while keeping the *small number of datasets* promise (one lookup
-file per IOC type, no source-specific exports).
+Status snapshot: **2026-11-27**. This page is the operational ledger for the
+repository: what ships today, what is deliberately pending, and how the datasets
+compose with adjacent lookup projects. It is a documentation artifact only; the
+authoritative machine-readable state remains `config/sources.yaml`,
+`config/settings.yaml` and the `metadata.json` of each release.
 
-Source expansion is **config-only**: each new feed is just an entry in
-`config/sources.yaml` with a `weight` (global reliability) and optional
-`ioc_weights` (per-IOC-type reliability). No core-logic changes are required.
-Rollout is phased to keep review simple and avoid rate-limit/format surprises.
+## 1. What is done (shipped)
 
-## Shipped (MVP)
+### 1.1 Platform and pipeline
 
-- [x] Config-driven source framework (`sources.yaml` parsing model) + JSON Schema.
-- [x] Multi-IOC pipeline: ip/network/asn/domain/url/md5/sha256/email.
-- [x] Sources: FireHOL level1 + per-category sets, Spamhaus DROP and ASN-DROP,
-      Abuse.ch Feodo, AbuseIPDB blacklist, AlienVault OTX (multi-type), DShield
-      intelfeed.
-- [x] Confident scoring with global + per-IOC-type (`ioc_weights`) weights,
-      banded caps and decay.
-- [x] State persistence (`state.json`), CSV + JSON + `metadata.json` export.
-- [x] Offline fixtures + integration tests (config-only new-source proof).
-- [x] Concurrent, rate-limited downloads; `.env` secrets (skipped when absent).
-- [x] GitHub Actions build + release (every 6h), Docker image.
-- [x] Docs: architecture, scoring, sources, CrowdStrike integration.
+- **Config-driven ETL.** 23 origins / 41 feeds in `config/sources.yaml`; adding a
+  feed is config-only. Each origin has one scoring identity and a `feeds` array.
+- **Eight consolidated datasets**: `malicious_ips`, `malicious_networks`,
+  `malicious_asns`, `malicious_domains`, `malicious_urls`, `malicious_md5`,
+  `malicious_sha256`, `malicious_emails`, each with CSV and JSON mirrors, plus
+  `metadata.json` and `state.json`.
+- **Pipeline stages**: fetch → parse/clean/classify → union/dedupe → state merge
+  → allowlist/bogon filtering → ASN enrichment (ip2asn v4/v6) → scoring → TTL and
+  precision-floor pruning → deterministic CSV/JSON export.
+- **ASN is authoritative only.** `malicious_asns` comes exclusively from Spamhaus
+  ASN-DROP; ASN columns on IP/network rows are context.
+- **Allowlist suppression.** `role: allowlist` feeds (alphaMountain top1M) are
+  parsed into a suppression set, never scored or exported, and applied to the
+  fresh frame and carried-over state. Matching is exact plus the `www.` variant.
+- **State and history.** `first_seen`/`last_seen` and per-origin counts persist in
+  `state.json`; recency and persistence drive scoring instead of rebuild noise.
+- **Fetch resilience.** Pagination with `max_pages`/`max_seconds`, partial-page
+  retention, exponential retries, per-host rate limiting, on-disk body cache and
+  a persisted daily quota (AbuseIPDB 5/day). Missing keys and exhausted quotas are
+  `skipped`, never `failed`.
+- **Operational CLI**: `build`, `collect`, `validate`, `schema`; `--offline`,
+  `--dry-run`, `--state`, `--cache-dir`, `--version`.
+- **Packaging**: Dockerfile, `uv` lockfile, JSON Schemas for both config files.
 
-### Precision changes (anti-false-positive)
+### 1.2 Source coverage (shipped)
 
-- `malicious_asns` is now **only** the authoritative Spamhaus ASN-DROP list
-  (JSONL). The previous ASN rollup (flagged IP -> whole ASN malicious) was
-  removed because a single IP marked thousands of unrelated addresses.
-  `asn`/`asn_name`/`country` on IP/network rows remain context only.
-- Export uses `min_confidence: 75`; single non-authoritative sources (cap 70)
-  and OTX-only rows (cap 55) are not published. `md5`/`sha256`/`email` therefore
-  appear only when corroborated by a second source.
-- Empty datasets are omitted (not written as empty lookups) and reported in
-  `metadata.json` (`ioc_counts` = 0, `empty_datasets`).
-- Per-feed statuses and reasons are recorded in `metadata.source_feeds`; an
-  empty feed no longer marks a whole origin `partial`.
+| IOC type | Origins |
+|----------|---------|
+| IP | `firehol`, `abusech`, `abuseipdb`, `dshield`, `alienvault_otx`, `cins`, `ipsum`, `c2intelfeeds`, `alienvault_reputation`, `bbcan177`, `botvrij`, `jamesbrine`, `linuxtracker`, `viriback`, `tweetfeed` |
+| Network | `firehol`, `spamhaus`, `alienvault_otx` |
+| ASN | `spamhaus` (ASN-DROP only) |
+| Domain | `alienvault_otx`, `bbcan177`, `botvrij`, `joewein`, `minerchk`, `nocoin`, `disconnect`, `tweetfeed`, `alphamountain` |
+| URL | `alienvault_otx`, `botvrij`, `openphish`, `phishtank`, `viriback`, `tweetfeed` |
+| MD5 | `alienvault_otx`, `tweetfeed` |
+| SHA256 | `alienvault_otx`, `botvrij`, `tweetfeed` |
+| Email | `alienvault_otx` |
 
-The focus remains **threat hunting**: read-only lookup context, never IOC
-mutation. Precision decisions above reduce noise in hunting joins.
+The exact feeds, weights and `ioc_weights` are in `docs/sources.md`; live
+per-feed outcomes are in `metadata.json#source_feeds`.
 
-## Expansion plan (phased)
+### 1.3 Precision and reliability changes already applied
 
-The catalogue of ~390 active feeds in
-[threat-intelligence-feeds.csv](https://github.com/kraloveckey/threat-intelligence-feeds/raw/refs/heads/main/threat-intelligence-feeds.csv)
-plus the curated lists at
-[hslatman/awesome-threat-intelligence](https://github.com/hslatman/awesome-threat-intelligence/)
-and [mthcht/awesome-lists](https://github.com/mthcht/awesome-lists) is triaged
-here in waves. Each wave is config-only, reviewed independently, and adds
-coverage of a specific IOC type without touching the core.
+- **Authoritative ASNs only**: no IP→ASN rollup, no `malicious_ip_count` field.
+- **Precision floors**: global `min_confidence: 75`; per-type
+  `min_confidence_by_type.email: 55` so OTX-only emails remain useful. Single
+  non-authoritative sources are capped at 70 and pruned.
+- **Empty datasets are omitted** (not published as empty lookups) and listed in
+  `metadata.empty_datasets` with a reason; stale files are removed.
+- **Per-feed statuses** (`ok`/`empty`/`partial`/`skipped`/`failed`) with rows,
+  types and reason; one failed feed never fails the origin.
+- **OTX fixed**: JSON `results` parsing, multi-page JSON merge, case-insensitive
+  canonical type map (`FileHash-MD5`, `URL`, `URI`, ...).
+- **Hash/email coverage improved**: TweetFeed and Botvrij SHA256 corroborate OTX;
+  `malicious_md5`/`sha256` are no longer invariably empty.
+- **Allowlist**: alphaMountain top1M suppresses legitimate-but-compromised
+  domains without down-weighting them and without hiding user-content subdomains.
+- **Bogon safety net**: private/reserved IPs/networks are never published, even
+  if a source omits cleaning.
 
-### Wave 0 — already shipped
+### 1.4 Automation, tests and docs
 
-The aggregate / hardest-to-source IOC types are live:
+- **GitHub Actions**: `Build Lookups` every 6 hours (`0 */6 * * *`) runs ruff,
+  mypy, pytest, the build, a “datasets exist” gate, and uploads CSV/JSON;
+  `Publish Release` creates a `YYYY.MM.DD.HHMM` release and updates `latest`.
+- **Cache persistence**: `actions/cache` restores `cache/` (HTTP bodies, daily
+  quota, ip2asn); the previous `state.json` is fetched from the latest release.
+- **Tests**: 87 tests across unit and offline integration suites, including
+  config-only source addition, allowlist suppression, ASN authority, state
+  carry-over, empty-dataset omission, cache/quota, and workflow guardrails.
+- **Docs**: README, architecture, scoring, sources, CrowdStrike examples,
+  contribution/security guides and issue templates (updated alongside this
+  roadmap).
 
-- `ip` / `network`: FireHOL level1 + per-category IP sets, Spamhaus DROP,
-  Feodo, DShield intelfeed, AbuseIPDB.
-- `domain|url|md5|sha256|email`: AlienVault OTX (multi-type).
+## 2. What is pending
 
-### Wave 1 — IP/network refinements (no auth, plain/CSV)
+### P0 — correctness and operational hardening
 
-Shipped: CINS Army, IPsum, C2IntelFeeds (ip) plus the threatfeeds.io additions
-AlienVault reputation, BBcan177, Botvrij (ips), James Brine brute-force hosts,
-Hancitor IPs, and Viriback (ip). More candidates:
+| Item | Why | Acceptance |
+|------|-----|------------|
+| State compaction | Live builds produce a large `state.json` (observed ~165 MB), which is published and downloaded every run. | Compact state or split it; target a stable, documented size budget and measure build time. |
+| Release integrity manifest | Consumers cannot verify artifact bytes from `metadata.json` today. | Add per-file `sha256`, `size_bytes`, `rows` and a `data_hash`; document verification. |
+| Delta report | SOAR consumers must diff full releases to know what changed. | Emit `changes.json` (added/removed/score-changed per dataset) with bounded size. |
+| Pre-release dataset validation | The workflow checks that datasets exist, not that they are sane. | Validate headers, uniqueness, sort order, bogon-free rows, ASN numeric JSON, row-count drift thresholds. |
+| Feed drift/staleness alerts | A feed can silently change format or go stale without failing. | Track expected minimum rows/headers and warn in `metadata.json` or CI. |
+| Metadata extensions | Consumers need floors/TTL/weights per dataset to interpret scores. | Publish `settings` snapshot (floors, TTL, weights) and build duration in `metadata.json`. |
+| Email/hash/domain coverage | Email is OTX-only at floor 55; hashes rely on a small set; domains are partly single-source. | Add verified corroborating feeds; re-evaluate floors with measured precision. |
+| Allowlist matching policy | Exact + `www.` avoids over-suppression but misses some compromised subdomains. | Decide whether to add opt-in parent-domain matching with a user-content exclusion list; document the trade-off. |
 
-| Source | Type | Suggested `weight` | Notes |
-|--------|------|--------------------|-------|
-| Emerging Threats Block IPs | ip | 75 | Community firewall blocklist |
-| Binarydefense banlist | ip | 72 | Threat list |
-| OffSeq Mirage ipv4-7d | ip | 80 | Honeypot attackers |
-| NetAPI compromised/ip/live | ip | 78 | Honeypot IPs, hourly |
+### P1 — source expansion
 
-### Wave 2 — domains & urls (no auth)
+Candidate waves, all config-only once verified. Add a fixture and a test per
+feed; record license, rate limits and expected update cadence.
 
-Shipped: OpenPhish, PhishTank, Botvrij (domains/hostnames/urls), joewein,
-minerchk, NoCoin, disconnect, BBcan177 DNSBL, Viriback (url). Candidates:
+- **IP/network**: Emerging Threats block IPs, Binary Defense, Data-Shield,
+  OffSeq Mirage, NetAPI, additional high-churn FireHOL sets.
+- **Domain/url**: Cert.PL, Phishing Army, spydisec, threatview, additional
+  phishing/URL feeds from the catalogue.
+- **Multi-type / hashes / email**: WSTNPHX emails, threatview MD5/SHA256,
+  OffSeq Mirage URLs/hashes, additional OSINT hash lists.
+- **Contextual (not malicious by default)**: Tor exit/all lists, open proxies,
+  VPN/datacenter ranges. These should be categories/context, not automatic
+  malicious indicators; see the integration section.
+- **Authenticated (skipped until a key exists)**: GreyNoise, Shadowserver,
+  Malshare, snort.org.
 
-| Source | Type | Suggested `weight` | Notes |
-|--------|------|--------------------|-------|
-| Phishing Army extended | url | 75 | Broad phishing URLs |
-| C2IntelFeeds domainC2s-30day | domain | 80 | Verified C2 domains |
-| Cert.PL malicious domains | domain | 78 | CERT-grade domains |
-| spydisec malicious domains | domain | 72 | Domains blocklist |
-| threatview URL/domain high-confidence | url,domain | 75 | OSINT-derived |
+Verification checklist for every candidate: reachability and final URL, stable
+headers/format, indicator types, expected row range, license/terms, rate limits,
+secret requirements, fixture, weight/`ioc_weights`, and a live `source_feeds`
+entry.
 
-### Wave 3 — multi-IOC community + hashes
+### P2 — integrations and consumption
 
-Feeds shipping several IOC types in one file; inspect format first.
+- **LogScale package**: a documented set of lookups and saved queries that
+  consumes the release plus (optionally) `logscale-lookup-files` context.
+- **Fusion SOAR template**: version-gated fetch, integrity check, and LogScale
+  lookup insert (read-only; no IOC Management).
+- **Combined bundle**: a small distribution workflow/repo that validates and
+  publishes both lookup families together.
+- **Downstream hunting toolkit**: `falcon-hunting-toolkit` consumes the release
+  manifest and both lookup families to generate hunts and enrichments.
 
-| Source | Type | `weight` | `ioc_weights` | Notes |
-|--------|------|----------|---------------|-------|
-| tweetfeed today.csv | ip,domain,url,md5,sha256 | 72 | — | Community Twitter IOCs; type-routed |
-| Botvrij.eu IOC lists | ip,domain,md5,sha256 | 74 | — | Per-type raw files |
-| WSTNPHX malware-email-addresses | email | 70 | email:85 | Email IOCs |
-| threatview MD5/SHA256 | md5,sha256 | 70 | — | Hash blocklists |
-| OffSeq Mirage urls-7d / hashes-sha256-30d | url,sha256 | 78 | — | Honeypot-captured |
+### P3 — project hygiene
 
-### Wave 4 — TOR / proxies / contextual (optional)
+- Changelog/release notes generated from `metadata.json` diffs.
+- SBOM and dependency-update automation.
+- Runbooks for source outages, quota exhaustion, and emergency rollback.
+- Optional release signing/provenance (SLSA or GitHub attestations).
 
-Optional sets that are operationally useful but may need label filtering.
+## 3. Integration with a similar repository
 
-- Tor exit/all nodes (dan.me.uk, SecOps-Institute, TorProject exit-addresses).
-- Open proxies (opsxcq) — `ip`.
-- VPN exit IP lists (`mthcht/awesome-lists` NordVPN/MullVad/ProtonVPN,
-  X4BNet) — contextual; useful for VPN-abuse detections.
-- Emerging Threats Tor rules — extract IPs from Snort-style rule text (needs a
-  small parse; may require a `regex_extract` clean op).
+The closest sibling is **`socketz/logscale-lookup-files`**. It also publishes
+LogScale lookup files from public intel, but its data model is complementary:
 
-### Wave 5 — authenticated / higher-effort
+| Project | Produces | Identity / contract |
+|---------|----------|---------------------|
+| `cs-lookup-files` | 8 malicious IOC datasets (ip, network, asn, domain, url, md5, sha256, email) with confidence, sources, categories, first/last seen | GitHub Releases `latest` + pinned `YYYY.MM.DD.HHMM`; `metadata.json` |
+| `logscale-lookup-files` | malicious package names/records; `ip_classified_networks.csv` with `network,source,use` (`malicious`, `tor`, `vpn`, `datacenter`) | committed `data/` + `manifest.json` (`data_hash`, per-file `sha256`/`rows`/`size_bytes`) |
 
-These require a key or more parsing and are gated behind `$VAR` secrets so they
-are *skipped* until configured.
+### 3.1 Why they compose
 
-- GreyNoise, Shadowserver (authenticated bulk).
-- Malshare current hashes (API key for larger pulls).
-- snort.org ip-block-list (Cisco account).
+- `cs-lookup-files` answers **“is this indicator malicious, how confident, and
+  why?”** It owns multi-type IOC scoring and authoritative ASN-DROP.
+- `logscale-lookup-files` answers **“what is this network used for, and which
+  list reported it?”** It owns usage classification (Tor/VPN/datacenter) and
+  malicious-package coverage.
+- Their IP sets overlap (FireHOL, Spamhaus, Feodo, IPsum). **Do not count the
+  same provider twice as independent confirmation.** Pick one as the scoring
+  authority (`cs-lookup-files`) and use the other as context/classification.
+- `logscale-lookup-files` deliberately yields **0 rows for Spamhaus ASN-DROP**
+  (it classifies networks, not ASNs). `cs-lookup-files` is the ASN authority.
 
-## Impediments to review (per wave)
+### 3.2 Integration patterns
 
-- **Format parsing**: some feeds expose IPs inside rule/HTML formats
-  (Emerging Threats rules, ProjectHoneypot RSS, CleanTalk pages). Need a new
-  parser or a `regex_extract` clean op; handled only when a feed is added.
-- **Rate limits**: per-host `requests_per_minute` already applied; keep any
-  new feed's setting conservative (e.g. `dan.me.uk` is rate-limited).
-- **File size / memory**: large composite feeds (IPsum, OffSeq) are fine but
-  watch total download size vs the 30-minute budget; `requests_per_minute` and
-  `max_workers` keep the pipeline polite.
-- **Multi-type split**: feeds like tweetfeed need `type_field`/`value_field`/
-  `type_map` routing (already supported).
-- **Authenticated-only feeds**: add the secret to `.env.example`; when absent,
-  the source is skipped, so CI remains green without keys.
+**A. Consumer-side composition in LogScale (no code changes).**
+Upload both lookup families and join events twice: first against
+`malicious_ips`/`malicious_networks`, then against `ip_classified_networks`
+(`match(..., mode=cidr, include=["use","source"])`). Use `use` to triage
+VPN/datacenter/Tor noise and to prioritize true malicious hits. See
+`docs/integration.md` for an example query.
 
-## Near-term (non-source)
+**B. Shared manifest/hash contract (small metadata change).**
+Align `cs-lookup-files`' `metadata.json` with `logscale-lookup-files`'
+`manifest.json`: `generated_at`, per-file `rows`/`sha256`/`size_bytes`,
+`data_hash`. This lets one deployment workflow verify both releases and decide
+whether to re-import. This is the highest-value, lowest-risk next integration
+step.
 
-- **Delta reports** — a small `changes.json` comparing current vs previous run
-  (new/removed indicators) for SOAR alerting.
-- **Lookup file linting** — CI job validating row counts, ASN coverage and
-  bogon-free output before release.
+**C. Combined distribution bundle (new workflow, no producer code change).**
+A third workflow/repo downloads both `latest` releases, validates
+`metadata.json` and `manifest.json`, checks hashes, and publishes a single
+“Falcon lookup bundle” (or uploads directly to LogScale). This keeps both
+producers independent and gives consumers one versioned artifact.
 
-## Medium-term
+**D. Producer-side context import (future code change).**
+`cs-lookup-files` could consume `ip_classified_networks.csv` as a **context**
+feed to add `use`/provider categories to IP/network rows, or to annotate
+datacenter/VPN hits. It must **not** be a generic allowlist: VPN/datacenter/Tor
+are not benign. This requires core changes (new contextual columns) and should
+follow pattern B/C.
 
-- **Category expansion** — richer `categories.field`/`mapping` tables for
-  multi-type feeds (e.g. OTX pulse tags → canonical categories).
-- **Optional per-dataset TTL/min-confidence** surface exposed via metadata so
-  consumers can pick higher-precision subsets.
-- **Feed drift alerting** — flag sources whose expected row-count range or
-  update latency drifts, to catch stale/broken feeds early.
+**E. Downstream consumer.**
+`falcon-hunting-toolkit` (adjacent planning repo) already treats
+`cs-lookup-files` as an input. It should consume both families, gate on
+`metadata.version`/`manifest.data_hash`, and generate hunts/enrichments without
+ever enrolling IOCs or triggering response.
 
-## Explicitly out of scope
+### 3.3 Field mapping
 
-Per the project charter, **no** plans for:
+| `cs-lookup-files` | `logscale-lookup-files` | Semantics |
+|-------------------|-------------------------|-----------|
+| `malicious_ips.ip` | `ip_classified_networks.network` (CIDR match, `/32` for hosts) | Same address space; join with `mode=cidr`. |
+| `malicious_networks.network` | `ip_classified_networks.network` | CIDR overlap/containment; avoid double-counting sources. |
+| `malicious_asns.asn` | `spamhaus-asndrop` is present but yields 0 rows | Use `cs-lookup-files` as the ASN authority. |
+| `sources` (origin ids) | `source` (feed slug) | Different granularity; map explicitly, never assume equal ids. |
+| `categories` | `use` (`malicious`/`tor`/`vpn`/`datacenter`) | Context vs threat category; not interchangeable. |
+| `confidence_score` | — | Preserve the `cs-lookup-files` score; classification does not alter it. |
+| `first_seen`/`last_seen` | `manifest.generated_at` (build-level) | Indicator history vs dataset build time. |
 
-- Malware-family attribution.
-- Case management or a full TIP.
-- Per-indicator live lookups or paid data sources.
+### 3.4 Guardrails
 
-## Contributing
+- **Read-only.** Neither project imports IOCs into Falcon IOC Management,
+  blocks, or triggers response. Composition must preserve that.
+- **No double confidence.** Overlapping providers must not be treated as
+  independent confirmations. Deduplicate before scoring or document the overlap.
+- **Version pinning.** Use `latest` for freshness, but pin
+  `YYYY.MM.DD.HHMM`/`data_hash` for investigations and audit.
+- **Empty datasets.** A missing `cs-lookup-files` dataset means “no qualifying
+  rows”, not “safe”; keep the previous lookup on 404 and inspect
+  `metadata.empty_datasets`.
+- **Classification is not reputation.** Tor/VPN/datacenter membership is context,
+  not evidence of malice.
+- **Rate limits and licenses.** Verify both upstream terms before combining or
+  redistributing feeds.
 
-Source requests are welcome as issues. Follow `CONTRIBUTING.md`; every change
-stays behind `config/sources.yaml` (plus a fixture for offline testing). When
-adding a source, set `weight` and, where the feed's reliability differs by IOC
-type, `ioc_weights`.
+### 3.5 Suggested sequence
+
+1. **Document the contract** (this roadmap and `docs/integration.md`).
+2. **Add hashes/sizes to `metadata.json`** and align field names with
+   `manifest.json` (P0).
+3. **Publish a combined bundle workflow** that validates both releases (pattern C).
+4. **Add LogScale/Fusion examples** that use both lookups (pattern A).
+5. **Evaluate contextual ingestion** of `ip_classified_networks.csv` (pattern D)
+   only after measuring false-positive impact.
+
+## 4. Out of scope
+
+- Full TIP functionality, case management, malware-family attribution.
+- Per-indicator live lookup endpoints or API enrichment per IOC.
+- IOC Management import, blocking, containment, or automated response.
+- Source-specific exports; the consolidated eight datasets are the contract.
+- Merging scoring models across repositories without an explicit, documented
+  decision.
+
+## 5. Contributing to the roadmap
+
+Open an issue with the template that matches the work (source request, feature,
+bug). For a source, include the verification checklist above. For an integration,
+state which contract fields or workflows change and whether it is consumer-side
+(no producer change) or producer-side (code change). Keep the project’s bias:
+small, high-quality, free-tier-sustainable datasets over feature count.

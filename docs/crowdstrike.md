@@ -29,7 +29,10 @@ https://github.com/socketz/cs-lookup-files/releases/latest/download/state.json
 ```
 
 `latest/download` is just distribution. Pin a `YYYY.MM.DD.HHMM` tag when you need
-a reproducible snapshot for an investigation.
+a reproducible snapshot for an investigation. Every dataset also has a `.json`
+mirror at the same URL with `.json` instead of `.csv`. `state.json` is an
+internal build-to-build artifact for the next pipeline run; do not import it as
+a hunting lookup.
 
 Datasets with zero rows are **not written**. A missing file means "no qualifying
 indicators this run", not a broken release; consumers must tolerate absence
@@ -39,9 +42,11 @@ distinguish "empty" from "missing".
 
 ## The export is already filtered
 
-`config/settings.yaml` sets `min_confidence: 75`, so every exported row is
-already at or above 75. Apply a **higher** threshold for hunting focus or
-automation; never assume a lower one will discard much.
+`config/settings.yaml` sets `min_confidence: 75` as the global export floor, and
+`min_confidence_by_type.email: 55` for `malicious_emails` (OTX is currently its
+only email source). Every exported row is therefore already at or above its
+dataset floor. Apply a **higher** threshold for hunting focus or automation;
+never assume a lower one will discard much.
 
 ## Falcon LogScale: import as a lookup
 
@@ -124,7 +129,7 @@ them for enrichment steps. Do **not** feed these rows into IOC Management.
   "source_url": "https://github.com/socketz/cs-lookup-files/releases/latest/download/malicious_ips.csv",
   "format": "csv",
   "target_lookup": "malicious_ips",
-  "schedule": "*/6 * * * *",
+  "schedule": "0 */6 * * *",
   "on_failure": "alert",
   "note": "read-only hunting context; does not modify Falcon IOCs"
 }
@@ -132,6 +137,17 @@ them for enrichment steps. Do **not** feed these rows into IOC Management.
 
 Fusion SOAR can `HTTP -> Fetch Media` then `Record Insert` into a LogScale
 lookup, gated on `metadata.json`'s `version` to avoid redundant re-imports.
+
+## Combining with other lookup families
+
+These datasets are designed to be composed with adjacent lookup projects such as
+[`logscale-lookup-files`](https://github.com/socketz/logscale-lookup-files)
+(IP usage classification and malicious packages). Join events to
+`malicious_ips`/`malicious_networks` for malicious reputation, then to
+`ip_classified_networks.csv` for `use`/`source` context. Do not treat
+`vpn`/`datacenter`/`tor` as a second malicious verdict, and do not double-count
+overlapping providers as independent confirmations. The full contract and field
+mapping are in [`docs/integration.md`](integration.md).
 
 ## Non-goals
 
